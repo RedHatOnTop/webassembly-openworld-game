@@ -1,0 +1,28 @@
+# Cargo configuration for Windows file lock issues
+# https://doc.rust-lang.org/cargo/reference/config.html
+
+# Use LLD linker for faster linking and fewer file lock issues
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# Alternative: Use lld-link directly if rust-lld doesn't work
+# linker = "lld-link.exe"
+
+# Reduce parallel jobs to minimize file lock contention
+[build]
+jobs = 2
+
+# Use incremental compilation but with smaller codegen units
+[profile.dev]
+incremental = true
+codegen-units = 16
+
+# Network and registry settings
+[net]
+retry = 3
+git-fetch-with-cli = true
+
+# Enable sparse registry protocol (faster, less locking)
+[registries.crates-io]
+protocol = "sparse"
