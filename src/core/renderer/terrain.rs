@@ -72,13 +72,15 @@ const _: () = assert!(std::mem::size_of::<TerrainVertex>() == 32);
 /// Memory Layout (16 bytes, 16-byte aligned):
 /// - `time`: f32 (4 bytes) - Current simulation time
 /// - `grid_size`: u32 (4 bytes) - Grid dimension
-/// - `_pad`: [u32; 2] (8 bytes) - Padding for 16-byte alignment
+/// - `chunk_offset_x`: f32 (4 bytes) - Camera X position for infinite terrain
+/// - `chunk_offset_z`: f32 (4 bytes) - Camera Z position for infinite terrain
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct TerrainUniforms {
     pub time: f32,
     pub grid_size: u32,
-    pub _pad: [u32; 2],
+    pub chunk_offset_x: f32,
+    pub chunk_offset_z: f32,
 }
 
 impl TerrainUniforms {
@@ -86,7 +88,8 @@ impl TerrainUniforms {
         Self {
             time: 0.0,
             grid_size: GRID_SIZE,
-            _pad: [0; 2],
+            chunk_offset_x: 0.0,
+            chunk_offset_z: 0.0,
         }
     }
 }
@@ -421,6 +424,13 @@ impl TerrainSystem {
     /// Updates the time uniform for animation.
     pub fn update_time(&mut self, time: f32) {
         self.uniforms.time = time;
+    }
+
+    /// Updates the camera position for infinite terrain scrolling.
+    /// The terrain mesh follows the camera, creating the illusion of infinite terrain.
+    pub fn update_camera_position(&mut self, cam_x: f32, cam_z: f32) {
+        self.uniforms.chunk_offset_x = cam_x;
+        self.uniforms.chunk_offset_z = cam_z;
     }
 
     /// Calculates the number of workgroups needed for vertex dispatch.

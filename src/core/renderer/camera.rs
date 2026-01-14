@@ -135,6 +135,46 @@ impl Camera {
             self.aspect = width as f32 / height as f32;
         }
     }
+
+    /// Moves the camera forward/backward along its view direction.
+    ///
+    /// Movement is projected onto the XZ plane for FPS-style movement.
+    ///
+    /// # Arguments
+    /// * `distance` - Positive for forward, negative for backward.
+    pub fn move_forward(&mut self, distance: f32) {
+        // Get forward direction projected onto XZ plane
+        let forward = (self.target - self.eye).normalize();
+        let forward_xz = Vec3::new(forward.x, 0.0, forward.z).normalize();
+        
+        // Move both eye and target
+        let offset = forward_xz * distance;
+        self.eye += offset;
+        self.target += offset;
+    }
+
+    /// Strafes the camera left/right perpendicular to view direction.
+    ///
+    /// # Arguments
+    /// * `distance` - Positive for right, negative for left.
+    pub fn move_right(&mut self, distance: f32) {
+        // Get right direction (cross product of forward and up)
+        let forward = (self.target - self.eye).normalize();
+        let right = forward.cross(self.up).normalize();
+        
+        // Move both eye and target
+        let offset = right * distance;
+        self.eye += offset;
+        self.target += offset;
+    }
+
+    /// Returns the camera's XZ position for infinite terrain scrolling.
+    ///
+    /// # Returns
+    /// Tuple of (x, z) position of the camera in world space.
+    pub fn get_xz_position(&self) -> (f32, f32) {
+        (self.eye.x, self.eye.z)
+    }
 }
 
 impl Default for Camera {

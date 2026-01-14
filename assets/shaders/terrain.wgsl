@@ -24,8 +24,8 @@ struct Vertex {
 struct TerrainUniforms {
     time: f32,
     grid_size: u32,
-    _pad0: u32,
-    _pad1: u32,
+    chunk_offset_x: f32,
+    chunk_offset_z: f32,
 }
 
 /// Camera uniform for rendering.
@@ -124,12 +124,17 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index = z * grid_size + x;
     let time = uniforms.time;
     
-    // Calculate world position (centered grid)
+    // Calculate world position (centered grid + chunk offset for infinite terrain)
     let half_size = f32(grid_size) * 0.5;
     let spacing = 0.5;  // World units between vertices
     
-    let world_x = (f32(x) - half_size) * spacing;
-    let world_z = (f32(z) - half_size) * spacing;
+    // Local position within the grid
+    let local_x = (f32(x) - half_size) * spacing;
+    let local_z = (f32(z) - half_size) * spacing;
+    
+    // World position = local + chunk offset (infinite terrain scrolling)
+    let world_x = local_x + uniforms.chunk_offset_x;
+    let world_z = local_z + uniforms.chunk_offset_z;
     let world_y = get_height(world_x, world_z, time);
     
     // Calculate normal using finite differences
@@ -146,8 +151,8 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     // This produces an upward-facing normal for a flat surface
     let normal = normalize(cross(tangent_z, tangent_x));
     
-    // Store vertex data
-    vertices[index].position = vec4<f32>(world_x, world_y, world_z, 1.0);
+    // Store vertex data (using local position for mesh, world for height/normal)
+    vertices[index].position = vec4<f32>(local_x, world_y, local_z, 1.0);
     vertices[index].normal = vec4<f32>(normal, 0.0);
 }
 

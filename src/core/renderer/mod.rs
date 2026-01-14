@@ -6,6 +6,8 @@
 //! - 3D camera with perspective projection
 //! - GPU-driven terrain mesh (Compute -> Storage -> Render pattern)
 //! - Directional lighting for 3D depth perception
+//! - Infinite terrain scrolling with camera movement (WASD)
+//! - Debug modes: wireframe (F1), double-sided (F2)
 
 mod context;
 pub mod geometry;
@@ -20,9 +22,32 @@ use camera::{Camera, CameraUniform};
 use terrain::{TerrainSystem, INDEX_COUNT};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use glam::Mat4;
 
 use crate::game::GameState;
+
+// ============================================================================
+// Debug State
+// ============================================================================
+
+/// Debug rendering state.
+#[derive(Debug, Clone, Copy)]
+pub struct DebugState {
+    /// Wireframe mode enabled (F1 toggle).
+    pub wireframe: bool,
+    /// Double-sided rendering enabled (F2 toggle).
+    pub double_sided: bool,
+}
+
+impl Default for DebugState {
+    fn default() -> Self {
+        Self {
+            wireframe: false,
+            double_sided: false,
+        }
+    }
+}
 
 // ============================================================================
 // Renderer
@@ -53,6 +78,14 @@ pub struct Renderer {
     index_buffer: wgpu::Buffer,
     /// GPU-driven terrain mesh system.
     terrain_system: TerrainSystem,
+    /// Debug rendering state.
+    debug_state: DebugState,
+    /// Wireframe terrain render pipeline (optional, requires POLYGON_MODE_LINE).
+    terrain_wireframe_pipeline: Option<wgpu::RenderPipeline>,
+    /// Double-sided terrain render pipeline (no backface culling).
+    terrain_double_sided_pipeline: wgpu::RenderPipeline,
+    /// Movement input state: (forward, right) - accumulated per frame.
+    movement_input: (f32, f32),
 }
 
 impl Renderer {
@@ -128,6 +161,31 @@ impl Renderer {
             INDEX_COUNT
         );
 
+        // Create wireframe pipeline (optional, requires POLYGON_MODE_LINE)
+        let terrain_wireframe_pipeline = if ctx.polygon_mode_supported {
+            Some(Self::create_terrain_pipeline(
+                &ctx.device,
+                ctx.config.format,
+                &camera_bind_group_layout,
+                wgpu::PolygonMode::Line,
+                Some(wgpu::Face::Back),
+            ))
+        } else {
+            log::warn!("Wireframe mode unavailable (POLYGON_MODE_LINE not supported)");
+            None
+        };
+
+        // Create double-sided pipeline (no backface culling)
+        let terrain_double_sided_pipeline = Self::create_terrain_pipeline(
+            &ctx.device,
+            ctx.config.format,
+            &camera_bind_group_layout,
+            wgpu::PolygonMode::Fill,
+            None, // No culling
+        );
+        log::info!("Debug terrain pipelines created (wireframe: {}, double-sided: ready)",
+            if ctx.polygon_mode_supported { "ready" } else { "unavailable" });
+
         Self {
             ctx,
             camera,
@@ -139,6 +197,10 @@ impl Renderer {
             vertex_buffer,
             index_buffer,
             terrain_system,
+            debug_state: DebugState::default(),
+            terrain_wireframe_pipeline,
+            terrain_double_sided_pipeline,
+            movement_input: (0.0, 0.0),
         }
     }
 
@@ -232,6 +294,89 @@ impl Renderer {
             label: Some("Cube Index Buffer"),
             contents: bytemuck::cast_slice(CUBE_INDICES),
             usage: wgpu::BufferUsages::INDEX,
+        })
+    }
+
+    /// Creates a terrain render pipeline with specified polygon mode and culling.
+    ///
+    /// Used to create the main pipeline, wireframe pipeline, and double-sided pipeline.
+    fn create_terrain_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        camera_bind_group_layout: &wgpu::BindGroupLayout,
+        polygon_mode: wgpu::PolygonMode,
+        cull_mode: Option<wgpu::Face>,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Terrain Shader (Debug)"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../assets/shaders/terrain.wgsl").into(),
+            ),
+        });
+
+        // Render storage bind group layout
+        let render_storage_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Debug Render Storage Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Terrain Debug Pipeline Layout"),
+            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Terrain Debug Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode,
+                polygon_mode,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
         })
     }
 
@@ -384,7 +529,16 @@ impl Renderer {
                 bytemuck::cast_slice(&[terrain_camera_uniform]),
             );
 
-            render_pass.set_pipeline(&self.terrain_system.render_pipeline);
+            // Select terrain pipeline based on debug state
+            let terrain_pipeline = if self.debug_state.wireframe {
+                self.terrain_wireframe_pipeline.as_ref().unwrap_or(&self.terrain_system.render_pipeline)
+            } else if self.debug_state.double_sided {
+                &self.terrain_double_sided_pipeline
+            } else {
+                &self.terrain_system.render_pipeline
+            };
+
+            render_pass.set_pipeline(terrain_pipeline);
             render_pass.set_bind_group(0, &self.terrain_system.render_bind_group_0, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_index_buffer(
@@ -415,5 +569,74 @@ impl Renderer {
         output.present();
 
         Ok(())
+    }
+
+    /// Handles keyboard input for debug toggles and camera movement.
+    ///
+    /// # Arguments
+    /// * `key_code` - The physical key that was pressed.
+    /// * `pressed` - Whether the key was pressed (true) or released (false).
+    ///
+    /// # Returns
+    /// `true` if the input was handled, `false` otherwise.
+    pub fn handle_key(&mut self, key_code: PhysicalKey, pressed: bool) -> bool {
+        match key_code {
+            // Debug toggles (only on press, not release)
+            PhysicalKey::Code(KeyCode::F1) if pressed => {
+                if self.terrain_wireframe_pipeline.is_some() {
+                    self.debug_state.wireframe = !self.debug_state.wireframe;
+                    log::info!("Wireframe mode: {}", if self.debug_state.wireframe { "ON" } else { "OFF" });
+                } else {
+                    log::warn!("Wireframe mode unavailable (POLYGON_MODE_LINE not supported)");
+                }
+                true
+            }
+            PhysicalKey::Code(KeyCode::F2) if pressed => {
+                self.debug_state.double_sided = !self.debug_state.double_sided;
+                log::info!("Double-sided mode: {}", if self.debug_state.double_sided { "ON" } else { "OFF" });
+                true
+            }
+            // WASD movement
+            PhysicalKey::Code(KeyCode::KeyW) => {
+                self.movement_input.0 = if pressed { 1.0 } else { 0.0 };
+                true
+            }
+            PhysicalKey::Code(KeyCode::KeyS) => {
+                self.movement_input.0 = if pressed { -1.0 } else { 0.0 };
+                true
+            }
+            PhysicalKey::Code(KeyCode::KeyA) => {
+                self.movement_input.1 = if pressed { -1.0 } else { 0.0 };
+                true
+            }
+            PhysicalKey::Code(KeyCode::KeyD) => {
+                self.movement_input.1 = if pressed { 1.0 } else { 0.0 };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Updates camera movement based on accumulated input.
+    ///
+    /// Called once per frame to apply smooth camera movement.
+    ///
+    /// # Arguments
+    /// * `delta_time` - Time elapsed since last frame.
+    pub fn update_movement(&mut self, delta_time: f32) {
+        const MOVE_SPEED: f32 = 10.0; // Units per second
+
+        let (forward, right) = self.movement_input;
+        
+        if forward != 0.0 {
+            self.camera.move_forward(forward * MOVE_SPEED * delta_time);
+        }
+        if right != 0.0 {
+            self.camera.move_right(right * MOVE_SPEED * delta_time);
+        }
+
+        // Update terrain chunk offset for infinite scrolling
+        let (cam_x, cam_z) = self.camera.get_xz_position();
+        self.terrain_system.update_camera_position(cam_x, cam_z);
     }
 }

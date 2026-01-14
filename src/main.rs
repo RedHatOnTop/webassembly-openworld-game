@@ -15,6 +15,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::PhysicalKey,
     window::{Window, WindowId},
 };
 
@@ -106,12 +107,23 @@ impl ApplicationHandler for App {
                     renderer.resize(physical_size.width, physical_size.height);
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                // Forward keyboard events to renderer for debug toggles and camera movement
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.handle_key(event.physical_key, event.state.is_pressed());
+                }
+            }
             WindowEvent::RedrawRequested => {
                 // Update time manager
                 self.time.update();
 
                 // Get delta time with spiral-of-death protection
                 let delta_time = self.time.delta_time().min(MAX_FRAME_TIME);
+
+                // Update camera movement (smooth, frame-rate independent)
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.update_movement(delta_time);
+                }
 
                 // Accumulate time for fixed updates
                 self.accumulator += delta_time;

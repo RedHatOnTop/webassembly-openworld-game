@@ -15,6 +15,8 @@ pub struct RenderContext {
     pub depth_texture: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
     pub size: (u32, u32),
+    /// Whether POLYGON_MODE_LINE feature is supported (for wireframe rendering).
+    pub polygon_mode_supported: bool,
 }
 
 impl RenderContext {
@@ -53,12 +55,27 @@ impl RenderContext {
         );
         log::info!("Driver: {}", adapter_info.driver);
 
+        // Check if POLYGON_MODE_LINE is supported for wireframe rendering
+        let adapter_features = adapter.features();
+        let polygon_mode_supported = adapter_features.contains(wgpu::Features::POLYGON_MODE_LINE);
+        log::info!(
+            "POLYGON_MODE_LINE support: {}",
+            if polygon_mode_supported { "yes" } else { "no (wireframe unavailable)" }
+        );
+
+        // Request features (only if supported)
+        let required_features = if polygon_mode_supported {
+            wgpu::Features::POLYGON_MODE_LINE
+        } else {
+            wgpu::Features::empty()
+        };
+
         // Request device with AAA-ready limits
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Aether Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits {
                         max_bind_groups: 8,
                         max_storage_buffers_per_shader_stage: 8,
@@ -120,6 +137,7 @@ impl RenderContext {
             depth_texture,
             depth_view,
             size: (width, height),
+            polygon_mode_supported,
         }
     }
 
