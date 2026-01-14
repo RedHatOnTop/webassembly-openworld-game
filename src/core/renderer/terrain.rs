@@ -9,11 +9,20 @@
 //! - Position/Normal update compute shader (per-frame)
 //! - Solid mesh rendering with TriangleList topology
 //! - Directional lighting in fragment shader
+//! - Triplanar texture mapping with TextureArray
 //!
 //! Reference: `docs/04_TASKS/task_06_terrain_mesh.md`
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+
+use super::texture::{
+    TextureArrayBuilder, TextureData,
+    GRASS_COLOR_1, GRASS_COLOR_2,
+    ROCK_COLOR_1, ROCK_COLOR_2,
+    SNOW_COLOR_1, SNOW_COLOR_2,
+    create_terrain_sampler, DEFAULT_TEXTURE_SIZE,
+};
 
 // ============================================================================
 // Constants
@@ -147,6 +156,19 @@ pub struct TerrainSystem {
     pub render_pipeline: wgpu::RenderPipeline,
     /// Bind group 0 for render: vertex storage (read).
     pub render_bind_group_0: wgpu::BindGroup,
+    /// Bind group 2 for render: texture array + sampler.
+    pub render_bind_group_2: wgpu::BindGroup,
+
+    // === Texture Resources ===
+    /// Terrain texture array (Grass, Rock, Snow).
+    #[allow(dead_code)]
+    pub texture_array: wgpu::Texture,
+    /// Terrain texture array view.
+    #[allow(dead_code)]
+    pub texture_view: wgpu::TextureView,
+    /// Terrain sampler.
+    #[allow(dead_code)]
+    pub sampler: wgpu::Sampler,
 
     // === State Flags ===
     /// Whether indices have been generated (only done once).
@@ -158,10 +180,12 @@ impl TerrainSystem {
     ///
     /// # Arguments
     /// * `device` - WebGPU device for resource creation.
+    /// * `queue` - WebGPU queue for texture uploads.
     /// * `surface_format` - Surface texture format for render pipeline.
     /// * `camera_bind_group_layout` - Shared camera bind group layout.
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -267,6 +291,66 @@ impl TerrainSystem {
             });
 
         // =====================================================================
+        // Texture Array Creation (Triplanar Mapping)
+        // =====================================================================
+
+        // Load terrain textures with fallback to checkerboard patterns
+        let grass_texture = TextureData::load_or_fallback(
+            "assets/textures/grass.png",
+            GRASS_COLOR_1,
+            GRASS_COLOR_2,
+        );
+        let rock_texture = TextureData::load_or_fallback(
+            "assets/textures/rock.png",
+            ROCK_COLOR_1,
+            ROCK_COLOR_2,
+        );
+        let snow_texture = TextureData::load_or_fallback(
+            "assets/textures/snow.png",
+            SNOW_COLOR_1,
+            SNOW_COLOR_2,
+        );
+
+        // Build texture array: Layer 0 = Grass, Layer 1 = Rock, Layer 2 = Snow
+        let (texture_array, texture_view) = TextureArrayBuilder::new(
+            DEFAULT_TEXTURE_SIZE,
+            DEFAULT_TEXTURE_SIZE,
+        )
+            .add_layer(grass_texture)
+            .add_layer(rock_texture)
+            .add_layer(snow_texture)
+            .build(device, queue, "Terrain Texture Array");
+
+        // Create sampler for terrain textures
+        let sampler = create_terrain_sampler(device);
+
+        // Render bind group layout 2: Texture array + Sampler
+        let render_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Terrain Render Texture Bind Group Layout"),
+                entries: &[
+                    // Texture array
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // =====================================================================
         // Bind Groups
         // =====================================================================
 
@@ -304,6 +388,22 @@ impl TerrainSystem {
                 binding: 0,
                 resource: vertex_buffer.as_entire_binding(),
             }],
+        });
+
+        // Render bind group 2: Texture array + Sampler
+        let render_bind_group_2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Render Texture Bind Group"),
+            layout: &render_texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
 
         // =====================================================================
@@ -358,7 +458,8 @@ impl TerrainSystem {
                 label: Some("Terrain Render Pipeline Layout"),
                 // Group 0: Vertex storage buffer
                 // Group 1: Camera uniform
-                bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout],
+                // Group 2: Texture array + Sampler
+                bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout],
                 push_constant_ranges: &[],
             });
 
@@ -417,6 +518,10 @@ impl TerrainSystem {
             compute_bind_group_1,
             render_pipeline,
             render_bind_group_0,
+            render_bind_group_2,
+            texture_array,
+            texture_view,
+            sampler,
             indices_generated: false,
         }
     }

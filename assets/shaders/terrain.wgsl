@@ -2,12 +2,13 @@
 //
 // GPU-driven terrain mesh system using Compute -> Storage -> Render pipeline.
 // Generates a solid terrain mesh with proper normals and directional lighting.
+// Uses triplanar texture mapping for realistic terrain without UV stretching.
 //
 // Compute Shaders:
 //   - cs_generate_indices: One-time index buffer generation (6 indices per quad)
 //   - cs_update_terrain: Per-frame position and normal updates
 //
-// Reference: docs/04_TASKS/task_06_terrain_mesh.md
+// Reference: docs/04_TASKS/task_06_terrain_mesh.md, task_08_triplanar_texture.md
 
 // ============================================================================
 // Shared Data Structures
@@ -166,6 +167,24 @@ var<storage, read> vertices_read: array<Vertex>;
 @group(1) @binding(0)
 var<uniform> camera: CameraUniform;
 
+// Texture array: Layer 0 = Grass, Layer 1 = Rock, Layer 2 = Snow
+@group(2) @binding(0)
+var terrain_textures: texture_2d_array<f32>;
+
+@group(2) @binding(1)
+var terrain_sampler: sampler;
+
+// ============================================================================
+// Texture Layer Indices
+// ============================================================================
+
+const LAYER_GRASS: i32 = 0;
+const LAYER_ROCK: i32 = 1;
+const LAYER_SNOW: i32 = 2;
+
+// Texture scale (world units per texture repeat)
+const TEXTURE_SCALE: f32 = 0.2;
+
 // ============================================================================
 // Vertex Shader
 // ============================================================================
@@ -190,46 +209,89 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 }
 
 // ============================================================================
-// Fragment Shader with Directional Lighting
+// Fragment Shader with Triplanar Texture Mapping
 // ============================================================================
 
-/// Fragment shader applies Lambertian diffuse lighting.
-/// Creates a terrain color gradient based on height.
+/// Samples a texture layer at the given UV coordinates.
+fn sample_texture_layer(uv: vec2<f32>, layer: i32) -> vec4<f32> {
+    return textureSample(terrain_textures, terrain_sampler, uv, layer);
+}
+
+/// Triplanar texture mapping function.
+/// Projects textures from 3 orthogonal axes and blends based on normal direction.
+/// This eliminates UV stretching on steep slopes.
+fn triplanar_sample(world_pos: vec3<f32>, normal: vec3<f32>, layer: i32) -> vec4<f32> {
+    // Calculate blending weights based on absolute normal components
+    let blend_weights = abs(normal);
+    // Normalize weights so they sum to 1
+    let weights = blend_weights / (blend_weights.x + blend_weights.y + blend_weights.z);
+    
+    // Scale world position for texture coordinates
+    let scaled_pos = world_pos * TEXTURE_SCALE;
+    
+    // Sample texture from each projection axis:
+    // X-axis projection: use YZ plane
+    let x_proj = sample_texture_layer(scaled_pos.yz, layer);
+    // Y-axis projection: use XZ plane (top-down view)
+    let y_proj = sample_texture_layer(scaled_pos.xz, layer);
+    // Z-axis projection: use XY plane
+    let z_proj = sample_texture_layer(scaled_pos.xy, layer);
+    
+    // Blend projections based on normal direction
+    return x_proj * weights.x + y_proj * weights.y + z_proj * weights.z;
+}
+
+/// Samples terrain texture with slope-based blending.
+/// Flat surfaces get grass, slopes get rock, high altitude gets snow.
+fn sample_terrain_texture(world_pos: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
+    // Slope factor: 1.0 = flat (facing up), 0.0 = vertical wall
+    let slope = normal.y;
+    
+    // Height for snow blending
+    let height = world_pos.y;
+    
+    // Sample textures using triplanar mapping
+    let grass = triplanar_sample(world_pos, normal, LAYER_GRASS);
+    let rock = triplanar_sample(world_pos, normal, LAYER_ROCK);
+    let snow = triplanar_sample(world_pos, normal, LAYER_SNOW);
+    
+    // Slope-based grass/rock blend
+    // steep_factor: 0 = flat (grass), 1 = steep (rock)
+    let steep_threshold = 0.7;
+    let steep_factor = 1.0 - smoothstep(steep_threshold - 0.2, steep_threshold + 0.1, slope);
+    var base_color = mix(grass, rock, steep_factor);
+    
+    // Height-based snow blend (above y=1.5)
+    let snow_start = 1.0;
+    let snow_full = 2.0;
+    let snow_factor = smoothstep(snow_start, snow_full, height) * slope;
+    base_color = mix(base_color, snow, snow_factor);
+    
+    return base_color;
+}
+
+/// Fragment shader with triplanar textured terrain and Lambertian lighting.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Normalize interpolated normal (may be denormalized after interpolation)
     let normal = normalize(in.world_normal);
     
+    // Sample terrain texture using triplanar mapping
+    let texture_color = sample_terrain_texture(in.world_position, normal);
+    
     // Directional light (pointing towards light source, upper-right-front)
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
     
     // Ambient light (minimum illumination)
-    let ambient = 0.25;
+    let ambient = 0.3;
     
     // Diffuse lighting (Lambertian reflectance)
     let n_dot_l = max(dot(normal, light_dir), 0.0);
-    let diffuse = n_dot_l * 0.75;
-    
-    // Height-based terrain color gradient
-    let height = in.world_position.y;
-    
-    // Color palette
-    let deep_color = vec3<f32>(0.15, 0.25, 0.35);   // Dark blue-gray (valleys)
-    let mid_color = vec3<f32>(0.25, 0.45, 0.20);    // Green (mid-level)
-    let high_color = vec3<f32>(0.50, 0.45, 0.35);   // Brown-tan (peaks)
-    
-    // Blend colors based on height [-2, 2] range
-    let t = clamp((height + 2.0) / 4.0, 0.0, 1.0);
-    var base_color: vec3<f32>;
-    if (t < 0.5) {
-        base_color = mix(deep_color, mid_color, t * 2.0);
-    } else {
-        base_color = mix(mid_color, high_color, (t - 0.5) * 2.0);
-    }
+    let diffuse = n_dot_l * 0.7;
     
     // Final color with lighting
     let lighting = ambient + diffuse;
-    let final_color = base_color * lighting;
+    let final_color = texture_color.rgb * lighting;
     
     return vec4<f32>(final_color, 1.0);
 }

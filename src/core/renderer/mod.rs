@@ -8,11 +8,13 @@
 //! - Directional lighting for 3D depth perception
 //! - Infinite terrain scrolling with camera movement (WASD)
 //! - Debug modes: wireframe (F1), double-sided (F2)
+//! - Triplanar texture mapping with TextureArray
 
 mod context;
 pub mod geometry;
 pub mod camera;
 pub mod terrain;
+pub mod texture;
 
 use std::sync::Arc;
 
@@ -149,14 +151,15 @@ impl Renderer {
         let index_buffer = Self::create_index_buffer(&ctx.device);
         log::info!("Cube index buffer created (36 indices)");
 
-        // Create terrain system (GPU-driven mesh generation)
+        // Create terrain system (GPU-driven mesh generation with triplanar texturing)
         let terrain_system = TerrainSystem::new(
             &ctx.device,
+            &ctx.queue,
             ctx.config.format,
             &camera_bind_group_layout,
         );
         log::info!(
-            "Terrain system created ({} vertices, {} indices, compute shaders)",
+            "Terrain system created ({} vertices, {} indices, triplanar texturing)",
             terrain::VERTEX_COUNT,
             INDEX_COUNT
         );
@@ -329,9 +332,32 @@ impl Renderer {
             }],
         });
 
+        // Texture bind group layout
+        let render_texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Debug Texture Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Debug Pipeline Layout"),
-            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout],
+            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout],
             push_constant_ranges: &[],
         });
 
@@ -541,6 +567,7 @@ impl Renderer {
             render_pass.set_pipeline(terrain_pipeline);
             render_pass.set_bind_group(0, &self.terrain_system.render_bind_group_0, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.terrain_system.render_bind_group_2, &[]);
             render_pass.set_index_buffer(
                 self.terrain_system.index_buffer.slice(..),
                 wgpu::IndexFormat::Uint32,
