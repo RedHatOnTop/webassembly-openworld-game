@@ -340,8 +340,6 @@ fn get_terrain_height(world_x: f32, world_z: f32, seed: f32) -> f32 {
     let sea_level = 0.0;
     
     // === Base Height from Continentalness ===
-    // Scaled for 100x100 grid visibility
-    // -1.0 (Ocean) -> -15m, 0.0 (Coast) -> +2m, +1.0 (Peaks) -> +40m
     var base_height: f32;
     if (climate.continentalness < -0.2) {
         // Ocean floor: relatively flat
@@ -357,24 +355,29 @@ fn get_terrain_height(world_x: f32, world_z: f32, seed: f32) -> f32 {
         base_height = sea_level + 5.0 + land_t * 35.0;
     }
     
-    // === Apply Peaks/Valleys on Land Only ===
-    let mountain_mask = smoothstep(0.0, 0.5, climate.continentalness);
-    let peak_height = climate.peaks_valleys * 25.0 * mountain_mask;
+    // === Ocean Mask (FIX: suppress peaks underwater) ===
+    // -0.1 = fully underwater -> 0.0 mask
+    //  0.1 = land -> 1.0 mask
+    let ocean_mask = smoothstep(-0.1, 0.1, climate.continentalness);
+    
+    // === Apply Peaks/Valleys (masked by ocean) ===
+    let mountain_strength = smoothstep(0.0, 0.5, climate.continentalness);
+    let peak_height = climate.peaks_valleys * 25.0 * mountain_strength * ocean_mask;
     
     // === Erosion Effect ===
     let erosion_factor = 1.0 - (climate.erosion * 0.5 + 0.5) * 0.3;
     
-    // === Detail Noise ===
+    // === Detail Noise (also masked by ocean) ===
     let detail_pos = vec3(world_x * 0.1, 0.0, world_z * 0.1);
-    let detail_strength = smoothstep(-0.1, 0.3, climate.continentalness) * 3.0;
+    let detail_strength = smoothstep(-0.1, 0.3, climate.continentalness) * 3.0 * ocean_mask;
     let detail = simplex_noise_3d(detail_pos + vec3(seed * 100.0)) * detail_strength;
     
     // Combine all contributions
     var height = base_height + peak_height * erosion_factor + detail;
     
-    // Ocean floor ripples
+    // Ocean floor: gentle ripples only (no spikes)
     if (climate.continentalness < -0.2) {
-        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.05, 0.0, world_z * 0.05)) * 1.5;
+        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.03, 0.0, world_z * 0.03)) * 1.0;
         height += ocean_floor_noise;
     }
     
@@ -433,12 +436,14 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index = z * grid_size + x;
     let seed = global_uniforms.seed;
     
-    // Calculate world position
-    let half_size = f32(grid_size) * 0.5;
-    let spacing = 1.0;
+    // FIX: Spacing must cover exactly CHUNK_SIZE units across (grid_size - 1) gaps
+    // This ensures vertex[99] of chunk A aligns with vertex[0] of chunk B
+    let chunk_world_size = 100.0;  // CHUNK_SIZE from Rust
+    let spacing = chunk_world_size / f32(grid_size - 1u);
     
-    let local_x = (f32(x) - half_size) * spacing;
-    let local_z = (f32(z) - half_size) * spacing;
+    // Calculate local position within chunk (0 to chunk_world_size)
+    let local_x = f32(x) * spacing - chunk_world_size * 0.5;
+    let local_z = f32(z) * spacing - chunk_world_size * 0.5;
     
     // Add chunk offset for world position
     let world_x = local_x + chunk_uniforms.offset_x;
@@ -456,7 +461,7 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tangent_z = vec3<f32>(0.0, height_pz - world_y, delta);
     let normal = normalize(cross(tangent_z, tangent_x));
     
-    // Store local position (chunk offset applied in shader)
+    // Store local position (chunk offset applied in vertex shader)
     vertices[index].position = vec4<f32>(local_x, world_y, local_z, 1.0);
     vertices[index].normal = vec4<f32>(normal, 0.0);
 }
@@ -628,8 +633,8 @@ fn get_debug_color(climate: ClimateChannels, debug_mode: u32) -> vec4<f32> {
 // Fragment Shader
 // ============================================================================
 
-// Fog constants
-const FOG_COLOR: vec3<f32> = vec3(0.7, 0.8, 0.9);  // Light blue-grey (matches sky)
+// Fog constants - matches sky clear color for seamless horizon
+const FOG_COLOR: vec3<f32> = vec3(0.6, 0.75, 0.9);  // Light sky blue
 const FOG_START: f32 = 150.0;   // Start fading at this distance
 const FOG_END: f32 = 350.0;     // Fully fogged at this distance
 

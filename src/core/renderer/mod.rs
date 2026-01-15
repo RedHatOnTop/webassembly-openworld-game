@@ -303,8 +303,8 @@ impl Renderer {
 
         // Sky color (matches fog color for seamless horizon)
         let clear_color = wgpu::Color {
-            r: 0.7,
-            g: 0.8,
+            r: 0.6,
+            g: 0.75,
             b: 0.9,
             a: 1.0,
         };
