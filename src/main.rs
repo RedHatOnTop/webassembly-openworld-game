@@ -3,7 +3,7 @@
 //! Implements a decoupled game loop with:
 //! - Fixed timestep for deterministic game logic (60 Hz)
 //! - Variable timestep for smooth rendering
-//! - Accumulator pattern with spiral-of-death protection
+//! - Free camera (WASD + mouse look)
 
 mod core;
 mod game;
@@ -13,9 +13,8 @@ use game::GameState;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{DeviceEvent, WindowEvent, MouseButton, ElementState},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::PhysicalKey,
     window::{Window, WindowId},
 };
 
@@ -23,20 +22,17 @@ use winit::{
 const FIXED_TIMESTEP: f32 = 1.0 / 60.0;
 
 /// Maximum frame time to prevent spiral of death.
-/// If a frame takes longer than this, accumulated time is capped.
 const MAX_FRAME_TIME: f32 = 0.25;
 
 /// Application state handler for winit 0.30.
-///
-/// Manages the game loop with decoupled update and render cycles.
 struct App {
     /// Window handle.
     window: Option<Arc<Window>>,
     /// WebGPU renderer.
     renderer: Option<Renderer>,
-    /// Game simulation state (updated at fixed timestep).
+    /// Game simulation state.
     game_state: GameState,
-    /// Time manager for delta and elapsed time tracking.
+    /// Time manager.
     time: Time,
     /// Accumulator for fixed timestep logic.
     accumulator: f32,
@@ -76,13 +72,13 @@ impl ApplicationHandler for App {
             self.window = Some(window);
             self.renderer = Some(renderer);
 
-            // Reset time manager when window is created
             self.time = Time::new();
             log::info!(
                 "Game loop initialized | Fixed timestep: {:.4}s ({} Hz)",
                 FIXED_TIMESTEP,
                 (1.0 / FIXED_TIMESTEP) as u32
             );
+            log::info!("Controls: WASD=Move, Space/Shift=Up/Down, Right-Click+Drag=Look, F1-F4=Debug Viz");
         }
     }
 
@@ -108,9 +104,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Forward keyboard events to renderer for debug toggles and camera movement
                 if let Some(renderer) = &mut self.renderer {
                     renderer.handle_key(event.physical_key, event.state.is_pressed());
+                }
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.handle_mouse_button(button, state == ElementState::Pressed);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -120,7 +120,7 @@ impl ApplicationHandler for App {
                 // Get delta time with spiral-of-death protection
                 let delta_time = self.time.delta_time().min(MAX_FRAME_TIME);
 
-                // Update camera movement (smooth, frame-rate independent)
+                // Update camera movement
                 if let Some(renderer) = &mut self.renderer {
                     renderer.update_movement(delta_time);
                 }
@@ -128,16 +128,16 @@ impl ApplicationHandler for App {
                 // Accumulate time for fixed updates
                 self.accumulator += delta_time;
 
-                // Fixed timestep updates (deterministic game logic)
+                // Fixed timestep updates
                 while self.accumulator >= FIXED_TIMESTEP {
                     self.game_state.update(FIXED_TIMESTEP);
                     self.accumulator -= FIXED_TIMESTEP;
                 }
 
-                // Calculate interpolation alpha for smooth rendering
+                // Calculate interpolation alpha
                 let alpha = self.accumulator / FIXED_TIMESTEP;
 
-                // Render with current state and interpolation factor
+                // Render
                 if let Some(renderer) = &mut self.renderer {
                     match renderer.render(&self.game_state, alpha) {
                         Ok(_) => {}
@@ -160,6 +160,15 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: DeviceEvent) {
+        // Handle raw mouse motion for camera look
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.handle_mouse_motion(delta);
+            }
         }
     }
 }

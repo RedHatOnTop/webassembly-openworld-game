@@ -297,25 +297,22 @@ fn get_climate_channels(world_pos: vec3<f32>, seed: f32) -> ClimateChannels {
     // Offset positions by seed to create different worlds
     let seed_offset = vec3(seed * 1000.0, 0.0, seed * 500.0);
     
-    // Apply domain warping for more organic continental shapes
-    // Increased amplitude for more dramatic warping
-    let warped_pos = domain_warp_3d(world_pos + seed_offset, 100.0, 0.001);
+    // Apply domain warping for more organic shapes
+    let warped_pos = domain_warp_3d(world_pos + seed_offset, 20.0, 0.01);
     
-    // === Continentalness === (Very low frequency for HUGE continents)
-    // Reduced frequency from 0.0008 to 0.0002 for much larger landmasses
-    let cont_raw = fbm_3d(warped_pos * 0.0002, 4);
+    // === Continentalness === (Visible within 100x100 grid)
+    // Frequency 0.005 = features every ~200 units, visible in our grid
+    let cont_raw = fbm_3d(warped_pos * 0.005, 4);
     // Remap through spline for distinct continental edges
     result.continentalness = cubic_spline(cont_raw, CONTINENTALNESS_SPLINE);
     
-    // === Erosion === (Higher frequency for more detailed roughness)
-    // Different seed offset to decorrelate from continentalness
+    // === Erosion === (Medium frequency for terrain variation)
     let erosion_pos = world_pos + vec3(seed * 2000.0 + 1000.0, 0.0, seed * 1000.0);
-    result.erosion = fbm_3d(erosion_pos * 0.003, 3);  // Increased from 0.002
+    result.erosion = fbm_3d(erosion_pos * 0.01, 3);
     
-    // === Peaks & Valleys === (Ridge noise for sharp mountain definition)
-    // Only meaningful on land, uses ridged noise
+    // === Peaks & Valleys === (Ridge noise for hills and valleys)
     let peaks_pos = world_pos + vec3(seed * 1500.0, 0.0, seed * 750.0);
-    result.peaks_valleys = ridged_fbm_3d(peaks_pos * 0.002, 5);  // More octaves for detail
+    result.peaks_valleys = ridged_fbm_3d(peaks_pos * 0.008, 4);
     
     return result;
 }
@@ -329,54 +326,41 @@ fn get_terrain_height(world_x: f32, world_z: f32, seed: f32) -> f32 {
     let sea_level = 0.0;
     
     // === Base Height from Continentalness ===
-    // Map continentalness [-1, 1] to height
-    // -1.0 (Deep Ocean) -> -80m below sea level (flat ocean floor)
-    //  0.0 (Coast)      -> +5m above sea level (beaches)
-    // +1.0 (High Peaks) -> +250m above sea level
+    // Scaled for 100x100 grid visibility
+    // -1.0 (Ocean) -> -15m, 0.0 (Coast) -> +2m, +1.0 (Peaks) -> +40m
     var base_height: f32;
-    if (climate.continentalness < -0.3) {
-        // Ocean floor: relatively flat with slight variation
-        // Maps [-1, -0.3] to [-80, -30]
-        let ocean_t = (climate.continentalness + 1.0) / 0.7;
-        base_height = sea_level - 80.0 + ocean_t * 50.0;
-    } else if (climate.continentalness < 0.1) {
-        // Continental shelf and coast: steep transition
-        // Maps [-0.3, 0.1] to [-30, +20]
-        let coast_t = (climate.continentalness + 0.3) / 0.4;
-        base_height = sea_level - 30.0 + coast_t * 50.0;
+    if (climate.continentalness < -0.2) {
+        // Ocean floor: relatively flat
+        let ocean_t = (climate.continentalness + 1.0) / 0.8;
+        base_height = sea_level - 15.0 + ocean_t * 10.0;
+    } else if (climate.continentalness < 0.2) {
+        // Coast: transition zone
+        let coast_t = (climate.continentalness + 0.2) / 0.4;
+        base_height = sea_level - 5.0 + coast_t * 10.0;
     } else {
-        // Land: gradual rise to peaks
-        // Maps [0.1, 1.0] to [+20, +150]
-        let land_t = (climate.continentalness - 0.1) / 0.9;
-        base_height = sea_level + 20.0 + land_t * 130.0;
+        // Land: gradual rise
+        let land_t = (climate.continentalness - 0.2) / 0.8;
+        base_height = sea_level + 5.0 + land_t * 35.0;
     }
     
     // === Apply Peaks/Valleys on Land Only ===
-    // Mountain contribution scales with continentalness (more inland = bigger mountains)
-    let mountain_mask = smoothstep(0.0, 0.6, climate.continentalness);
-    // Increased peak contribution for sharper, taller mountains
-    let peak_height = climate.peaks_valleys * climate.peaks_valleys * 150.0 * mountain_mask;
-    
-    // Extra boost for high continental areas (mountain cores)
-    let continental_peak_boost = smoothstep(0.5, 0.9, climate.continentalness) * 100.0;
+    let mountain_mask = smoothstep(0.0, 0.5, climate.continentalness);
+    let peak_height = climate.peaks_valleys * 25.0 * mountain_mask;
     
     // === Erosion Effect ===
-    // High erosion = flatter terrain (less height variation)
-    // Low erosion = more rugged terrain
-    let erosion_factor = 1.0 - (climate.erosion * 0.5 + 0.5) * 0.4;
+    let erosion_factor = 1.0 - (climate.erosion * 0.5 + 0.5) * 0.3;
     
     // === Detail Noise ===
-    // Small-scale variation for natural look (only on land)
-    let detail_pos = vec3(world_x * 0.03, 0.0, world_z * 0.03);
-    let detail_strength = smoothstep(-0.2, 0.3, climate.continentalness) * 8.0;
+    let detail_pos = vec3(world_x * 0.1, 0.0, world_z * 0.1);
+    let detail_strength = smoothstep(-0.1, 0.3, climate.continentalness) * 3.0;
     let detail = simplex_noise_3d(detail_pos + vec3(seed * 100.0)) * detail_strength;
     
     // Combine all contributions
-    var height = base_height + (peak_height + continental_peak_boost) * erosion_factor + detail;
+    var height = base_height + peak_height * erosion_factor + detail;
     
-    // Ocean floor ripples (very subtle)
-    if (climate.continentalness < -0.3) {
-        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.01, 0.0, world_z * 0.01)) * 3.0;
+    // Ocean floor ripples
+    if (climate.continentalness < -0.2) {
+        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.05, 0.0, world_z * 0.05)) * 1.5;
         height += ocean_floor_noise;
     }
     
