@@ -210,11 +210,12 @@ impl VegetationSystem {
         });
 
         // Uniform buffer
+        // Uniform buffer - seed MUST match terrain (DEFAULT_SEED * 0.0001)
         let uniforms = VegetationUniforms {
             camera_x: 0.0,
             camera_y: 50.0,
             camera_z: 0.0,
-            seed: 12345.0,
+            seed: 12345.0 * 0.0001,  // CRITICAL: Must match terrain.rs seed calculation!
             time: 0.0,
             density: 0.6,  // Higher density
             spacing: VEGETATION_SPACING,
