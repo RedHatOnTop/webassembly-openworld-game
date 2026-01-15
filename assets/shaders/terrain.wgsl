@@ -510,7 +510,8 @@ const DEBUG_MODE_PEAKS: u32 = 3u;
 const LAYER_GRASS: i32 = 0;
 const LAYER_ROCK: i32 = 1;
 const LAYER_SNOW: i32 = 2;
-const TEXTURE_SCALE: f32 = 0.1;
+const LAYER_SAND: i32 = 3;
+const TEXTURE_SCALE: f32 = 0.05;  // UV scale for triplanar mapping
 
 
 // ============================================================================
@@ -684,8 +685,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let deep_water = vec3(0.02, 0.08, 0.25);
         let shallow_water = vec3(0.1, 0.35, 0.6);
         
+        // Sample sand texture for seabed visibility through shallow water
+        let seabed_tex = triplanar_sample(frag_pos, normal, LAYER_SAND).rgb;
+        let seabed_tint = seabed_tex * vec3(0.4, 0.5, 0.6);  // Blue tint underwater
+        
         let depth_factor = smoothstep(0.0, 60.0, depth);
-        terrain_color = mix(shallow_water, deep_water, depth_factor);
+        terrain_color = mix(seabed_tint, deep_water, depth_factor);
         
         // Apply lighting
         let ambient = 0.5;
@@ -696,29 +701,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let wave_highlight = pow(max(dot(normal, light_dir), 0.0), 8.0) * 0.15;
         terrain_color += vec3(wave_highlight);
     } else {
-        // === Land Rendering ===
-        let slope = normal.y;
+        // === Land Rendering with Triplanar Texturing ===
+        let slope = 1.0 - normal.y;  // 0=flat, 1=vertical cliff
         
-        // Base colors
-        let grass_color = vec3(0.25, 0.55, 0.2);
-        let rock_color = vec3(0.45, 0.4, 0.35);
-        let sand_color = vec3(0.76, 0.7, 0.5);
-        let snow_color = vec3(0.95, 0.97, 1.0);
+        // Sample all texture layers using triplanar mapping
+        let grass_tex = triplanar_sample(frag_pos, normal, LAYER_GRASS).rgb;
+        let rock_tex = triplanar_sample(frag_pos, normal, LAYER_ROCK).rgb;
+        let sand_tex = triplanar_sample(frag_pos, normal, LAYER_SAND).rgb;
+        let snow_tex = triplanar_sample(frag_pos, normal, LAYER_SNOW).rgb;
         
-        // Height-based coloring
-        if (height < 10.0) {
-            let beach_factor = smoothstep(0.0, 10.0, height);
-            terrain_color = mix(sand_color, grass_color, beach_factor);
-        } else if (height < 100.0) {
-            terrain_color = grass_color;
-        } else {
-            let snow_factor = smoothstep(100.0, 180.0, height);
-            terrain_color = mix(grass_color, snow_color, snow_factor);
+        // Beach zone (near water level)
+        if (height < 8.0) {
+            let beach_factor = smoothstep(0.0, 8.0, height);
+            terrain_color = mix(sand_tex, grass_tex, beach_factor);
+        }
+        // Plains zone
+        else if (height < 80.0) {
+            terrain_color = grass_tex;
+        }
+        // Mountain zone with snow blend
+        else {
+            let snow_factor = smoothstep(80.0, 140.0, height);
+            terrain_color = mix(grass_tex, snow_tex, snow_factor);
         }
         
-        // Slope-based rock blending
-        let rock_factor = 1.0 - smoothstep(0.5, 0.85, slope);
-        terrain_color = mix(terrain_color, rock_color, rock_factor);
+        // Slope-based rock blending (cliffs always show rock)
+        let rock_factor = smoothstep(0.4, 0.7, slope);
+        terrain_color = mix(terrain_color, rock_tex, rock_factor);
         
         // Apply lighting
         let ambient = 0.35;

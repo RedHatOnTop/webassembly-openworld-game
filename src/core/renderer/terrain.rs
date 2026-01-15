@@ -25,6 +25,7 @@ use super::texture::{
     GRASS_COLOR_1, GRASS_COLOR_2,
     ROCK_COLOR_1, ROCK_COLOR_2,
     SNOW_COLOR_1, SNOW_COLOR_2,
+    SAND_COLOR_1, SAND_COLOR_2,
     create_terrain_sampler, DEFAULT_TEXTURE_SIZE,
 };
 
@@ -149,6 +150,12 @@ pub struct TerrainSystem {
     
     /// Render bind group for global uniforms (debug mode, fog).
     pub render_uniform_bind_group: wgpu::BindGroup,
+    
+    /// Texture array view (shared with vegetation).
+    texture_view: wgpu::TextureView,
+    
+    /// Terrain sampler (shared with vegetation).
+    sampler: wgpu::Sampler,
 
     // === State ===
     /// Whether indices have been generated.
@@ -327,11 +334,13 @@ impl TerrainSystem {
         let grass_texture = TextureData::load_or_fallback("assets/textures/grass.png", GRASS_COLOR_1, GRASS_COLOR_2);
         let rock_texture = TextureData::load_or_fallback("assets/textures/rock.png", ROCK_COLOR_1, ROCK_COLOR_2);
         let snow_texture = TextureData::load_or_fallback("assets/textures/snow.png", SNOW_COLOR_1, SNOW_COLOR_2);
+        let sand_texture = TextureData::load_or_fallback("assets/textures/sand.png", SAND_COLOR_1, SAND_COLOR_2);
 
-        let (texture_array, texture_view) = TextureArrayBuilder::new(DEFAULT_TEXTURE_SIZE, DEFAULT_TEXTURE_SIZE)
-            .add_layer(grass_texture)
-            .add_layer(rock_texture)
-            .add_layer(snow_texture)
+        let (_texture_array, texture_view) = TextureArrayBuilder::new(DEFAULT_TEXTURE_SIZE, DEFAULT_TEXTURE_SIZE)
+            .add_layer(grass_texture)  // Layer 0: Grass
+            .add_layer(rock_texture)   // Layer 1: Rock
+            .add_layer(snow_texture)   // Layer 2: Snow
+            .add_layer(sand_texture)   // Layer 3: Sand
             .build(device, queue, "Terrain Texture Array");
 
         let sampler = create_terrain_sampler(device);
@@ -504,6 +513,8 @@ impl TerrainSystem {
             render_pipeline,
             texture_bind_group,
             render_uniform_bind_group,
+            texture_view,
+            sampler,
             indices_generated: false,
         }
     }
@@ -605,5 +616,15 @@ impl TerrainSystem {
     /// Workgroup count for index dispatch.
     pub fn index_workgroup_count() -> u32 {
         (GRID_SIZE - 1 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE
+    }
+
+    /// Gets the shared texture array view (for vegetation).
+    pub fn get_texture_view(&self) -> &wgpu::TextureView {
+        &self.texture_view
+    }
+
+    /// Gets the shared terrain sampler (for vegetation).
+    pub fn get_sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
     }
 }

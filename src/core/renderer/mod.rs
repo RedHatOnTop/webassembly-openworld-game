@@ -16,12 +16,14 @@ pub mod camera;
 pub mod terrain;
 pub mod texture;
 pub mod chunk;
+pub mod vegetation;
 
 use std::sync::Arc;
 
 use context::RenderContext;
 use camera::{Camera, CameraController, CameraUniform};
 use terrain::TerrainSystem;
+use vegetation::VegetationSystem;
 use chunk::{CHUNK_SIZE, RENDER_DISTANCE, world_to_chunk_coord};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -50,7 +52,9 @@ pub struct Renderer {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    camera_bind_group_layout: wgpu::BindGroupLayout,
     terrain_system: TerrainSystem,
+    vegetation_system: VegetationSystem,
     debug_state: DebugState,
     terrain_wireframe_pipeline: Option<wgpu::RenderPipeline>,
     terrain_double_sided_pipeline: wgpu::RenderPipeline,
@@ -134,6 +138,18 @@ impl Renderer {
             if ctx.polygon_mode_supported { "ready" } else { "unavailable" }
         );
 
+        // Create vegetation system
+        let vegetation_system = VegetationSystem::new(
+            &ctx.device,
+            &ctx.queue,
+            ctx.config.format,
+            &camera_bind_group_layout,
+            &terrain_system.get_texture_view(),
+            &terrain_system.get_sampler(),
+        );
+
+        log::info!("Vegetation system initialized");
+
         Self {
             ctx,
             camera,
@@ -141,7 +157,9 @@ impl Renderer {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
+            camera_bind_group_layout,
             terrain_system,
+            vegetation_system,
             debug_state: DebugState::default(),
             terrain_wireframe_pipeline,
             terrain_double_sided_pipeline,
@@ -374,6 +392,33 @@ impl Renderer {
         self.terrain_system.clear_dirty_flags();
 
         // =====================================================================
+        // Vegetation Compute Pass: Place vegetation instances
+        // =====================================================================
+        if self.vegetation_system.enabled {
+            // Update vegetation uniforms
+            self.vegetation_system.update(
+                &self.ctx.queue,
+                state.time,
+                (self.camera.position.x, self.camera.position.y, self.camera.position.z),
+            );
+
+            // Reset instance count and counter for new frame
+            self.vegetation_system.reset_buffers(&self.ctx.queue);
+
+            // Dispatch vegetation placement compute shader
+            {
+                let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Vegetation Compute Pass"),
+                    timestamp_writes: None,
+                });
+                self.vegetation_system.dispatch_compute(&mut compute_pass);
+            }
+            
+            // Copy atomic counter to indirect buffer for draw call
+            self.vegetation_system.copy_counter_to_indirect(&mut encoder);
+        }
+
+        // =====================================================================
         // Render Pass: Draw all active chunks
         // =====================================================================
         {
@@ -426,6 +471,13 @@ impl Renderer {
                 render_pass.set_bind_group(4, &chunk.render_uniform_bind_group, &[]);  // FIX: Per-chunk offset
                 render_pass.draw_indexed(0..terrain::INDEX_COUNT, 0, 0..1);
                 _chunks_drawn += 1;
+            }
+
+            // =====================================================================
+            // Vegetation Rendering (Indirect Draw)
+            // =====================================================================
+            if self.vegetation_system.enabled {
+                self.vegetation_system.render(&mut render_pass, &self.camera_bind_group);
             }
         }
 

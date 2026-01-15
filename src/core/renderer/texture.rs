@@ -314,3 +314,7 @@ pub const ROCK_COLOR_2: [u8; 4] = [153, 153, 153, 255]; // Light gray
 /// Snow texture fallback colors (white/light blue checkerboard).
 pub const SNOW_COLOR_1: [u8; 4] = [240, 240, 255, 255]; // Near white
 pub const SNOW_COLOR_2: [u8; 4] = [220, 230, 255, 255]; // Light blue-white
+
+/// Sand texture fallback colors (yellow/tan checkerboard).
+pub const SAND_COLOR_1: [u8; 4] = [194, 178, 128, 255]; // Tan/sand
+pub const SAND_COLOR_2: [u8; 4] = [218, 194, 145, 255]; // Light sand
