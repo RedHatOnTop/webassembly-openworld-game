@@ -5,9 +5,11 @@
 //! - Pulsing background color (visual game loop verification)
 //! - 3D camera with perspective projection
 //! - GPU-driven terrain mesh (Compute -> Storage -> Render pattern)
+//! - 5-Channel Climate Model for procedural continental terrain
 //! - Directional lighting for 3D depth perception
 //! - Infinite terrain scrolling with camera movement (WASD)
-//! - Debug modes: wireframe (F1), double-sided (F2)
+//! - Terrain debug modes: Normal (F1), Continentalness (F2), Erosion (F3), Peaks (F4)
+//! - Render debug modes: Wireframe (F5), Double-sided (F6)
 //! - Triplanar texture mapping with TextureArray
 
 mod context;
@@ -36,9 +38,9 @@ use crate::game::GameState;
 /// Debug rendering state.
 #[derive(Debug, Clone, Copy)]
 pub struct DebugState {
-    /// Wireframe mode enabled (F1 toggle).
+    /// Wireframe mode enabled (F5 toggle).
     pub wireframe: bool,
-    /// Double-sided rendering enabled (F2 toggle).
+    /// Double-sided rendering enabled (F6 toggle).
     pub double_sided: bool,
 }
 
@@ -303,6 +305,7 @@ impl Renderer {
     /// Creates a terrain render pipeline with specified polygon mode and culling.
     ///
     /// Used to create the main pipeline, wireframe pipeline, and double-sided pipeline.
+    /// Includes bind group 3 for render uniforms (debug mode support).
     fn create_terrain_pipeline(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
@@ -317,7 +320,7 @@ impl Renderer {
             ),
         });
 
-        // Render storage bind group layout
+        // Render storage bind group layout (group 0)
         let render_storage_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain Debug Render Storage Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -332,7 +335,7 @@ impl Renderer {
             }],
         });
 
-        // Texture bind group layout
+        // Texture bind group layout (group 2)
         let render_texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain Debug Texture Layout"),
             entries: &[
@@ -355,9 +358,25 @@ impl Renderer {
             ],
         });
 
+        // Render uniform bind group layout (group 3) - for debug mode access in fragment shader
+        let render_uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Debug Render Uniform Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Debug Pipeline Layout"),
-            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout],
+            // Group 0: Vertex storage, Group 1: Camera, Group 2: Textures, Group 3: Render uniforms
+            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout, &render_uniform_layout],
             push_constant_ranges: &[],
         });
 
@@ -468,13 +487,9 @@ impl Renderer {
         // Update camera uniform for cube
         self.camera_uniform.update_view_proj(cube_view_proj);
 
-        // Update terrain system time
+        // Update terrain system time and write uniforms to both buffers
         self.terrain_system.update_time(state.time);
-        self.ctx.queue.write_buffer(
-            &self.terrain_system.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.terrain_system.uniforms]),
-        );
+        self.terrain_system.write_uniforms(&self.ctx.queue);
 
         let mut encoder = self
             .ctx
@@ -568,6 +583,7 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.terrain_system.render_bind_group_0, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(2, &self.terrain_system.render_bind_group_2, &[]);
+            render_pass.set_bind_group(3, &self.terrain_system.render_bind_group_3, &[]);
             render_pass.set_index_buffer(
                 self.terrain_system.index_buffer.slice(..),
                 wgpu::IndexFormat::Uint32,
@@ -600,6 +616,15 @@ impl Renderer {
 
     /// Handles keyboard input for debug toggles and camera movement.
     ///
+    /// # Key Bindings
+    /// - F1: Terrain visualization - Normal (textures + lighting)
+    /// - F2: Terrain visualization - Continentalness (blue=ocean, green=coast, brown=land)
+    /// - F3: Terrain visualization - Erosion (red=jagged, green=flat)
+    /// - F4: Terrain visualization - Peaks & Valleys (white=ridges, black=valleys)
+    /// - F5: Toggle wireframe mode
+    /// - F6: Toggle double-sided rendering
+    /// - WASD: Camera movement
+    ///
     /// # Arguments
     /// * `key_code` - The physical key that was pressed.
     /// * `pressed` - Whether the key was pressed (true) or released (false).
@@ -608,8 +633,25 @@ impl Renderer {
     /// `true` if the input was handled, `false` otherwise.
     pub fn handle_key(&mut self, key_code: PhysicalKey, pressed: bool) -> bool {
         match key_code {
-            // Debug toggles (only on press, not release)
+            // Terrain visualization modes (F1-F4)
             PhysicalKey::Code(KeyCode::F1) if pressed => {
+                self.terrain_system.set_debug_mode(0); // Normal
+                true
+            }
+            PhysicalKey::Code(KeyCode::F2) if pressed => {
+                self.terrain_system.set_debug_mode(1); // Continentalness
+                true
+            }
+            PhysicalKey::Code(KeyCode::F3) if pressed => {
+                self.terrain_system.set_debug_mode(2); // Erosion
+                true
+            }
+            PhysicalKey::Code(KeyCode::F4) if pressed => {
+                self.terrain_system.set_debug_mode(3); // Peaks & Valleys
+                true
+            }
+            // Render debug toggles (F5-F6)
+            PhysicalKey::Code(KeyCode::F5) if pressed => {
                 if self.terrain_wireframe_pipeline.is_some() {
                     self.debug_state.wireframe = !self.debug_state.wireframe;
                     log::info!("Wireframe mode: {}", if self.debug_state.wireframe { "ON" } else { "OFF" });
@@ -618,7 +660,7 @@ impl Renderer {
                 }
                 true
             }
-            PhysicalKey::Code(KeyCode::F2) if pressed => {
+            PhysicalKey::Code(KeyCode::F6) if pressed => {
                 self.debug_state.double_sided = !self.debug_state.double_sided;
                 log::info!("Double-sided mode: {}", if self.debug_state.double_sided { "ON" } else { "OFF" });
                 true

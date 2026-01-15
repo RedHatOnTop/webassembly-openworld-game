@@ -2,16 +2,19 @@
 //!
 //! GPU-driven terrain mesh system using compute shaders.
 //! Implements the "Compute -> Storage -> Render" pipeline pattern
-//! for procedural terrain generation with proper normals and lighting.
+//! for procedural terrain generation with 5-Channel Climate Model.
 //!
 //! Features:
 //! - Index generation compute shader (one-time)
-//! - Position/Normal update compute shader (per-frame)
+//! - Position/Normal update compute shader (per-frame) with climate model
 //! - Solid mesh rendering with TriangleList topology
 //! - Directional lighting in fragment shader
 //! - Triplanar texture mapping with TextureArray
+//! - Debug visualization modes for climate channels
 //!
-//! Reference: `docs/04_TASKS/task_06_terrain_mesh.md`
+//! Reference: 
+//!   - `docs/02_ARCHITECTURE/world_gen_strategy.md`
+//!   - `docs/04_TASKS/task_09_world_gen_macro.md`
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -40,6 +43,28 @@ pub const INDEX_COUNT: u32 = (GRID_SIZE - 1) * (GRID_SIZE - 1) * 6; // 58,806
 
 /// Workgroup size matching the compute shader.
 const WORKGROUP_SIZE: u32 = 8;
+
+/// Default world seed for terrain generation.
+const DEFAULT_SEED: u32 = 12345;
+
+/// Default sea level height.
+const DEFAULT_SEA_LEVEL: f32 = 0.0;
+
+// ============================================================================
+// Debug Mode Constants
+// ============================================================================
+
+/// Debug visualization mode: Normal rendering with textures.
+pub const DEBUG_MODE_NORMAL: u32 = 0;
+
+/// Debug visualization mode: Continentalness channel.
+pub const DEBUG_MODE_CONTINENTALNESS: u32 = 1;
+
+/// Debug visualization mode: Erosion channel.
+pub const DEBUG_MODE_EROSION: u32 = 2;
+
+/// Debug visualization mode: Peaks & Valleys channel.
+pub const DEBUG_MODE_PEAKS: u32 = 3;
 
 // ============================================================================
 // Terrain Vertex Structure
@@ -78,11 +103,15 @@ const _: () = assert!(std::mem::size_of::<TerrainVertex>() == 32);
 
 /// Uniforms for terrain compute shader.
 ///
-/// Memory Layout (16 bytes, 16-byte aligned):
+/// Memory Layout (32 bytes, 16-byte aligned for WebGPU):
 /// - `time`: f32 (4 bytes) - Current simulation time
 /// - `grid_size`: u32 (4 bytes) - Grid dimension
 /// - `chunk_offset_x`: f32 (4 bytes) - Camera X position for infinite terrain
 /// - `chunk_offset_z`: f32 (4 bytes) - Camera Z position for infinite terrain
+/// - `seed`: f32 (4 bytes) - World generation seed
+/// - `sea_level`: f32 (4 bytes) - Sea level reference height
+/// - `debug_mode`: u32 (4 bytes) - Debug visualization mode
+/// - `_padding`: u32 (4 bytes) - Padding for 16-byte alignment
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct TerrainUniforms {
@@ -90,15 +119,27 @@ pub struct TerrainUniforms {
     pub grid_size: u32,
     pub chunk_offset_x: f32,
     pub chunk_offset_z: f32,
+    pub seed: f32,
+    pub sea_level: f32,
+    pub debug_mode: u32,
+    pub _padding: u32,
 }
 
 impl TerrainUniforms {
     pub fn new() -> Self {
+        Self::with_seed(DEFAULT_SEED)
+    }
+
+    pub fn with_seed(seed: u32) -> Self {
         Self {
             time: 0.0,
             grid_size: GRID_SIZE,
             chunk_offset_x: 0.0,
             chunk_offset_z: 0.0,
+            seed: (seed as f32) * 0.0001, // Normalize seed for shader
+            sea_level: DEFAULT_SEA_LEVEL,
+            debug_mode: DEBUG_MODE_NORMAL,
+            _padding: 0,
         }
     }
 }
@@ -109,8 +150,8 @@ impl Default for TerrainUniforms {
     }
 }
 
-// Compile-time size verification
-const _: () = assert!(std::mem::size_of::<TerrainUniforms>() == 16);
+// Compile-time size verification (must be 32 bytes, 16-byte aligned)
+const _: () = assert!(std::mem::size_of::<TerrainUniforms>() == 32);
 
 // ============================================================================
 // Terrain System
@@ -133,9 +174,11 @@ pub struct TerrainSystem {
     /// Written by compute shader, read by draw_indexed.
     pub index_buffer: wgpu::Buffer,
 
-    // === Uniform Buffer ===
+    // === Uniform Buffers ===
     /// Uniform buffer for compute shader parameters.
     pub uniform_buffer: wgpu::Buffer,
+    /// Uniform buffer for render shader (fragment shader needs debug_mode).
+    pub render_uniform_buffer: wgpu::Buffer,
     /// Current uniform values.
     pub uniforms: TerrainUniforms,
 
@@ -158,6 +201,8 @@ pub struct TerrainSystem {
     pub render_bind_group_0: wgpu::BindGroup,
     /// Bind group 2 for render: texture array + sampler.
     pub render_bind_group_2: wgpu::BindGroup,
+    /// Bind group 3 for render: render uniforms (debug mode).
+    pub render_bind_group_3: wgpu::BindGroup,
 
     // === Texture Resources ===
     /// Terrain texture array (Grass, Rock, Snow).
@@ -189,8 +234,19 @@ impl TerrainSystem {
         surface_format: wgpu::TextureFormat,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        // Create uniforms
-        let uniforms = TerrainUniforms::new();
+        Self::with_seed(device, queue, surface_format, camera_bind_group_layout, DEFAULT_SEED)
+    }
+
+    /// Creates a new TerrainSystem with a specific world seed.
+    pub fn with_seed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        camera_bind_group_layout: &wgpu::BindGroupLayout,
+        seed: u32,
+    ) -> Self {
+        // Create uniforms with seed
+        let uniforms = TerrainUniforms::with_seed(seed);
 
         // =====================================================================
         // Buffer Creation
@@ -207,7 +263,6 @@ impl TerrainSystem {
         });
 
         // Index buffer (4 bytes per index * 58,806 indices = 235,224 bytes)
-        // Must have STORAGE usage for compute shader write access
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Terrain Index Buffer"),
             size: (std::mem::size_of::<u32>() * INDEX_COUNT as usize) as u64,
@@ -217,9 +272,16 @@ impl TerrainSystem {
             mapped_at_creation: false,
         });
 
-        // Uniform buffer
+        // Uniform buffer for compute shader
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Terrain Uniform Buffer"),
+            label: Some("Terrain Compute Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Uniform buffer for render shader (fragment shader needs access to uniforms)
+        let render_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Terrain Render Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -283,6 +345,22 @@ impl TerrainSystem {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        // Render bind group layout 3: Render uniforms (for fragment shader debug mode)
+        let render_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Terrain Render Uniform Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -406,6 +484,16 @@ impl TerrainSystem {
             ],
         });
 
+        // Render bind group 3: Render uniforms
+        let render_bind_group_3 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Render Uniform Bind Group"),
+            layout: &render_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: render_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         // =====================================================================
         // Shader Module
         // =====================================================================
@@ -459,7 +547,13 @@ impl TerrainSystem {
                 // Group 0: Vertex storage buffer
                 // Group 1: Camera uniform
                 // Group 2: Texture array + Sampler
-                bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout],
+                // Group 3: Render uniforms (debug mode)
+                bind_group_layouts: &[
+                    &render_storage_layout,
+                    camera_bind_group_layout,
+                    &render_texture_layout,
+                    &render_uniform_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
@@ -511,6 +605,7 @@ impl TerrainSystem {
             vertex_buffer,
             index_buffer,
             uniform_buffer,
+            render_uniform_buffer,
             uniforms,
             index_gen_pipeline,
             terrain_update_pipeline,
@@ -519,6 +614,7 @@ impl TerrainSystem {
             render_pipeline,
             render_bind_group_0,
             render_bind_group_2,
+            render_bind_group_3,
             texture_array,
             texture_view,
             sampler,
@@ -536,6 +632,53 @@ impl TerrainSystem {
     pub fn update_camera_position(&mut self, cam_x: f32, cam_z: f32) {
         self.uniforms.chunk_offset_x = cam_x;
         self.uniforms.chunk_offset_z = cam_z;
+    }
+
+    /// Sets the debug visualization mode.
+    ///
+    /// # Modes
+    /// - 0: Normal rendering (textures + lighting)
+    /// - 1: Continentalness visualization (blue=ocean, green=coast, brown=land)
+    /// - 2: Erosion visualization (red=jagged, green=flat)
+    /// - 3: Peaks & Valleys visualization (white=ridges, black=valleys)
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.uniforms.debug_mode = mode.min(3);
+        log::info!(
+            "Terrain debug mode: {}",
+            match self.uniforms.debug_mode {
+                0 => "Normal",
+                1 => "Continentalness",
+                2 => "Erosion",
+                3 => "Peaks & Valleys",
+                _ => "Unknown",
+            }
+        );
+    }
+
+    /// Gets the current debug mode.
+    pub fn debug_mode(&self) -> u32 {
+        self.uniforms.debug_mode
+    }
+
+    /// Cycles to the next debug mode.
+    pub fn cycle_debug_mode(&mut self) {
+        self.set_debug_mode((self.uniforms.debug_mode + 1) % 4);
+    }
+
+    /// Sets the world generation seed.
+    pub fn set_seed(&mut self, seed: u32) {
+        self.uniforms.seed = (seed as f32) * 0.0001;
+    }
+
+    /// Sets the sea level reference height.
+    pub fn set_sea_level(&mut self, level: f32) {
+        self.uniforms.sea_level = level;
+    }
+
+    /// Writes the current uniforms to both GPU buffers.
+    pub fn write_uniforms(&self, queue: &wgpu::Queue) {
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
+        queue.write_buffer(&self.render_uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
     }
 
     /// Calculates the number of workgroups needed for vertex dispatch.
