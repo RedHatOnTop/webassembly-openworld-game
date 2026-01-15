@@ -21,11 +21,11 @@ use wgpu::util::DeviceExt;
 /// Maximum number of vegetation instances.
 pub const MAX_VEGETATION_INSTANCES: u32 = 100_000;
 
-/// Spacing between vegetation samples in world units.
-pub const VEGETATION_SPACING: f32 = 2.0;
+/// Spacing between vegetation samples in world units (lower = denser).
+pub const VEGETATION_SPACING: f32 = 1.0;
 
 /// Grid size for vegetation compute dispatch (per chunk).
-pub const VEGETATION_GRID_SIZE: u32 = 64;
+pub const VEGETATION_GRID_SIZE: u32 = 128;
 
 // ============================================================================
 // Data Structures
@@ -216,7 +216,7 @@ impl VegetationSystem {
             camera_z: 0.0,
             seed: 12345.0,
             time: 0.0,
-            density: 0.4,
+            density: 0.6,  // Higher density
             spacing: VEGETATION_SPACING,
             _padding: 0.0,
         };
