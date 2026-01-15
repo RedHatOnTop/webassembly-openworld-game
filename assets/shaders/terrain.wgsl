@@ -194,14 +194,14 @@ fn domain_warp_3d(p: vec3<f32>, amplitude: f32, frequency: f32) -> vec3<f32> {
 
 // Control points for continentalness remapping
 // Format: vec2(input_noise_value, output_continental_value)
-// Creates distinct ocean/land boundaries
+// Creates distinct ocean/land boundaries with sharp coastlines
 const CONTINENTALNESS_SPLINE: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
-    vec2(-1.0, -1.0),   // Deep ocean stays deep
-    vec2(-0.4, -0.5),   // Gradual continental shelf transition
-    vec2(-0.1,  0.0),   // Sharp coastal definition
-    vec2( 0.3,  0.4),   // Inland plateau
-    vec2( 0.7,  0.6),   // Mountain foothills
-    vec2( 1.0,  1.0)    // Peak preservation
+    vec2(-1.0, -1.0),   // Deep ocean floor (very deep)
+    vec2(-0.5, -0.8),   // Deep ocean (flat floor)
+    vec2(-0.2, -0.3),   // Continental shelf (gradual rise)
+    vec2( 0.0,  0.1),   // Coastline (sharp transition)
+    vec2( 0.4,  0.5),   // Inland plateau
+    vec2( 1.0,  1.0)    // Mountain peaks
 );
 
 /// Linear spline interpolation for continentalness remapping.
@@ -298,23 +298,24 @@ fn get_climate_channels(world_pos: vec3<f32>, seed: f32) -> ClimateChannels {
     let seed_offset = vec3(seed * 1000.0, 0.0, seed * 500.0);
     
     // Apply domain warping for more organic continental shapes
-    let warped_pos = domain_warp_3d(world_pos + seed_offset, 50.0, 0.002);
+    // Increased amplitude for more dramatic warping
+    let warped_pos = domain_warp_3d(world_pos + seed_offset, 100.0, 0.001);
     
-    // === Continentalness === (Low frequency, defines land/ocean)
-    // Use very low frequency for large-scale continental structure
-    let cont_raw = fbm_3d(warped_pos * 0.0008, 4);
+    // === Continentalness === (Very low frequency for HUGE continents)
+    // Reduced frequency from 0.0008 to 0.0002 for much larger landmasses
+    let cont_raw = fbm_3d(warped_pos * 0.0002, 4);
     // Remap through spline for distinct continental edges
     result.continentalness = cubic_spline(cont_raw, CONTINENTALNESS_SPLINE);
     
-    // === Erosion === (Controls terrain roughness)
+    // === Erosion === (Higher frequency for more detailed roughness)
     // Different seed offset to decorrelate from continentalness
     let erosion_pos = world_pos + vec3(seed * 2000.0 + 1000.0, 0.0, seed * 1000.0);
-    result.erosion = fbm_3d(erosion_pos * 0.002, 3);
+    result.erosion = fbm_3d(erosion_pos * 0.003, 3);  // Increased from 0.002
     
-    // === Peaks & Valleys === (Ridge noise for mountain definition)
+    // === Peaks & Valleys === (Ridge noise for sharp mountain definition)
     // Only meaningful on land, uses ridged noise
     let peaks_pos = world_pos + vec3(seed * 1500.0, 0.0, seed * 750.0);
-    result.peaks_valleys = ridged_fbm_3d(peaks_pos * 0.003, 4);
+    result.peaks_valleys = ridged_fbm_3d(peaks_pos * 0.002, 5);  // More octaves for detail
     
     return result;
 }
@@ -324,41 +325,59 @@ fn get_terrain_height(world_x: f32, world_z: f32, seed: f32) -> f32 {
     let pos_3d = vec3(world_x, 0.0, world_z);
     let climate = get_climate_channels(pos_3d, seed);
     
-    // Sea level reference
-    let sea_level = uniforms.sea_level;
+    // Sea level reference (0.0 = sea level)
+    let sea_level = 0.0;
     
     // === Base Height from Continentalness ===
     // Map continentalness [-1, 1] to height
-    // -1.0 (Deep Ocean) -> -50m below sea level
-    //  0.0 (Coast)      -> sea level
-    // +1.0 (High Peaks) -> +150m above sea level
-    let base_height = sea_level + climate.continentalness * 100.0;
+    // -1.0 (Deep Ocean) -> -80m below sea level (flat ocean floor)
+    //  0.0 (Coast)      -> +5m above sea level (beaches)
+    // +1.0 (High Peaks) -> +250m above sea level
+    var base_height: f32;
+    if (climate.continentalness < -0.3) {
+        // Ocean floor: relatively flat with slight variation
+        // Maps [-1, -0.3] to [-80, -30]
+        let ocean_t = (climate.continentalness + 1.0) / 0.7;
+        base_height = sea_level - 80.0 + ocean_t * 50.0;
+    } else if (climate.continentalness < 0.1) {
+        // Continental shelf and coast: steep transition
+        // Maps [-0.3, 0.1] to [-30, +20]
+        let coast_t = (climate.continentalness + 0.3) / 0.4;
+        base_height = sea_level - 30.0 + coast_t * 50.0;
+    } else {
+        // Land: gradual rise to peaks
+        // Maps [0.1, 1.0] to [+20, +150]
+        let land_t = (climate.continentalness - 0.1) / 0.9;
+        base_height = sea_level + 20.0 + land_t * 130.0;
+    }
     
     // === Apply Peaks/Valleys on Land Only ===
     // Mountain contribution scales with continentalness (more inland = bigger mountains)
-    let mountain_mask = smoothstep(-0.1, 0.5, climate.continentalness);
-    let peak_height = climate.peaks_valleys * 80.0 * mountain_mask;
+    let mountain_mask = smoothstep(0.0, 0.6, climate.continentalness);
+    // Increased peak contribution for sharper, taller mountains
+    let peak_height = climate.peaks_valleys * climate.peaks_valleys * 150.0 * mountain_mask;
     
-    // Mountains are taller in areas with high continentalness
-    let continental_peak_boost = smoothstep(0.3, 0.8, climate.continentalness) * 50.0;
+    // Extra boost for high continental areas (mountain cores)
+    let continental_peak_boost = smoothstep(0.5, 0.9, climate.continentalness) * 100.0;
     
     // === Erosion Effect ===
     // High erosion = flatter terrain (less height variation)
     // Low erosion = more rugged terrain
-    let erosion_factor = 1.0 - (climate.erosion * 0.5 + 0.5) * 0.5;
+    let erosion_factor = 1.0 - (climate.erosion * 0.5 + 0.5) * 0.4;
     
     // === Detail Noise ===
-    // Small-scale variation for natural look
-    let detail_pos = vec3(world_x * 0.05, 0.0, world_z * 0.05);
-    let detail = simplex_noise_3d(detail_pos + vec3(seed * 100.0)) * 3.0;
+    // Small-scale variation for natural look (only on land)
+    let detail_pos = vec3(world_x * 0.03, 0.0, world_z * 0.03);
+    let detail_strength = smoothstep(-0.2, 0.3, climate.continentalness) * 8.0;
+    let detail = simplex_noise_3d(detail_pos + vec3(seed * 100.0)) * detail_strength;
     
     // Combine all contributions
     var height = base_height + (peak_height + continental_peak_boost) * erosion_factor + detail;
     
-    // Ocean floor variation (subtle)
+    // Ocean floor ripples (very subtle)
     if (climate.continentalness < -0.3) {
-        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.02, 0.0, world_z * 0.02)) * 5.0;
-        height += ocean_floor_noise * (1.0 - smoothstep(-1.0, -0.3, climate.continentalness));
+        let ocean_floor_noise = simplex_noise_3d(vec3(world_x * 0.01, 0.0, world_z * 0.01)) * 3.0;
+        height += ocean_floor_noise;
     }
     
     return height;
@@ -628,16 +647,69 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return debug_color;
     }
     
-    // Normal rendering with textures and lighting
-    let texture_color = sample_terrain_texture(in.world_position, normal);
-    
+    // === Normal Rendering with Water and Terrain ===
+    let height = in.world_position.y;
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let ambient = 0.3;
-    let n_dot_l = max(dot(normal, light_dir), 0.0);
-    let diffuse = n_dot_l * 0.7;
     
-    let lighting = ambient + diffuse;
-    let final_color = texture_color.rgb * lighting;
+    // Check if below sea level (water visualization)
+    if (height < 0.0) {
+        // Water/Ocean coloring based on depth
+        let depth = abs(height);
+        let deep_water = vec3(0.02, 0.08, 0.25);   // Deep ocean (dark blue)
+        let shallow_water = vec3(0.1, 0.35, 0.6);  // Shallow water (lighter blue)
+        
+        // Blend based on depth: shallow (0) to deep (-80)
+        let depth_factor = smoothstep(0.0, 60.0, depth);
+        var water_color = mix(shallow_water, deep_water, depth_factor);
+        
+        // Apply lighting
+        let ambient = 0.5;
+        let diffuse = max(dot(normal, light_dir), 0.0) * 0.4;
+        water_color = water_color * (ambient + diffuse);
+        
+        // Add subtle wave highlights
+        let wave_highlight = pow(max(dot(normal, light_dir), 0.0), 8.0) * 0.15;
+        water_color += vec3(wave_highlight);
+        
+        return vec4(water_color, 1.0);
+    }
     
-    return vec4<f32>(final_color, 1.0);
+    // === Land Rendering ===
+    // Slope-based material blending
+    let slope = normal.y;  // 1.0 = flat, 0.0 = vertical cliff
+    
+    // Base colors
+    let grass_color = vec3(0.25, 0.55, 0.2);   // Green grass
+    let rock_color = vec3(0.45, 0.4, 0.35);    // Gray-brown rock
+    let sand_color = vec3(0.76, 0.7, 0.5);     // Beach sand
+    let snow_color = vec3(0.95, 0.97, 1.0);    // White snow
+    
+    // Determine base terrain color by height and slope
+    var terrain_color: vec3<f32>;
+    
+    // Beach zone (just above water)
+    if (height < 10.0) {
+        let beach_factor = smoothstep(0.0, 10.0, height);
+        terrain_color = mix(sand_color, grass_color, beach_factor);
+    }
+    // Normal land
+    else if (height < 100.0) {
+        terrain_color = grass_color;
+    }
+    // High altitude (snow)
+    else {
+        let snow_factor = smoothstep(100.0, 180.0, height);
+        terrain_color = mix(grass_color, snow_color, snow_factor);
+    }
+    
+    // Slope-based rock blending (steep = rock)
+    let rock_factor = 1.0 - smoothstep(0.5, 0.85, slope);
+    terrain_color = mix(terrain_color, rock_color, rock_factor);
+    
+    // Apply lighting
+    let ambient = 0.35;
+    let diffuse = max(dot(normal, light_dir), 0.0) * 0.65;
+    terrain_color = terrain_color * (ambient + diffuse);
+    
+    return vec4(terrain_color, 1.0);
 }
