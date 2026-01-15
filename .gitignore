@@ -50,3 +50,6 @@ Desktop.ini
 
 # Shader compilation cache
 *.spv
+
+# External third-party assets (Kenney, etc.)
+/external/

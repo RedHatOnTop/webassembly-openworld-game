@@ -17,6 +17,7 @@ pub mod terrain;
 pub mod texture;
 pub mod chunk;
 pub mod vegetation;
+pub mod structures;
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use context::RenderContext;
 use camera::{Camera, CameraController, CameraUniform};
 use terrain::TerrainSystem;
 use vegetation::VegetationSystem;
+use structures::StructureSystem;
 use chunk::{CHUNK_SIZE, RENDER_DISTANCE, world_to_chunk_coord};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -55,6 +57,7 @@ pub struct Renderer {
     camera_bind_group_layout: wgpu::BindGroupLayout,
     terrain_system: TerrainSystem,
     vegetation_system: VegetationSystem,
+    structure_system: StructureSystem,
     debug_state: DebugState,
     terrain_wireframe_pipeline: Option<wgpu::RenderPipeline>,
     terrain_double_sided_pipeline: wgpu::RenderPipeline,
@@ -150,6 +153,15 @@ impl Renderer {
 
         log::info!("Vegetation system initialized");
 
+        // Create structure system
+        let structure_system = StructureSystem::new(
+            &ctx.device,
+            ctx.config.format,
+            &camera_bind_group_layout,
+        );
+
+        log::info!("Structure system initialized");
+
         Self {
             ctx,
             camera,
@@ -160,6 +172,7 @@ impl Renderer {
             camera_bind_group_layout,
             terrain_system,
             vegetation_system,
+            structure_system,
             debug_state: DebugState::default(),
             terrain_wireframe_pipeline,
             terrain_double_sided_pipeline,
@@ -419,6 +432,19 @@ impl Renderer {
         }
 
         // =====================================================================
+        // Structure Update: Generate instances based on camera position (CPU)
+        // =====================================================================
+        if self.structure_system.enabled {
+            let seed = 12345.0 * 0.0001;  // Match terrain seed
+            self.structure_system.update(
+                &self.ctx.queue,
+                self.camera.position.x,
+                self.camera.position.z,
+                seed,
+            );
+        }
+
+        // =====================================================================
         // Render Pass: Draw all active chunks
         // =====================================================================
         {
@@ -478,6 +504,17 @@ impl Renderer {
             // =====================================================================
             if self.vegetation_system.enabled {
                 self.vegetation_system.render(&mut render_pass, &self.camera_bind_group);
+            }
+
+            // =====================================================================
+            // Structure Rendering (Instanced Draw)
+            // =====================================================================
+            if self.structure_system.enabled {
+                self.structure_system.render(
+                    &mut render_pass,
+                    &self.ctx.queue,
+                    &self.camera_bind_group,
+                );
             }
         }
 

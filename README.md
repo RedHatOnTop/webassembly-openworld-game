@@ -146,3 +146,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [wgpu](https://wgpu.rs/) - Safe and portable GPU abstraction
 - [winit](https://github.com/rust-windowing/winit) - Cross-platform window handling
 - [glam](https://github.com/bitshifter/glam-rs) - Fast math library for games
+- [Kenney](https://kenney.nl/) - Free game assets (Nature Kit, Platformer Kit)
