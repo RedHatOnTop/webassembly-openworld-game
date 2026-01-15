@@ -247,16 +247,25 @@ struct Vertex {
     normal: vec4<f32>,    // xyz = normal vector, w = 0.0
 }
 
-/// Uniforms for terrain compute/render shaders.
-struct TerrainUniforms {
-    time: f32,
-    grid_size: u32,
-    chunk_offset_x: f32,
-    chunk_offset_z: f32,
-    seed: f32,
-    sea_level: f32,
-    debug_mode: u32,
+/// Per-chunk uniforms (used by compute shader).
+struct ChunkUniforms {
+    offset_x: f32,     // Chunk world offset X
+    offset_z: f32,     // Chunk world offset Z
+    grid_size: u32,    // Grid dimension
     _padding: u32,
+}
+
+/// Global uniforms (used by both compute and render).
+struct GlobalUniforms {
+    time: f32,
+    seed: f32,
+    debug_mode: u32,
+    _padding0: u32,
+    // Camera position for fog calculation
+    camera_x: f32,
+    camera_y: f32,
+    camera_z: f32,
+    _padding1: u32,
 }
 
 /// Camera uniform for rendering.
@@ -273,17 +282,22 @@ struct ClimateChannels {
 
 
 // ============================================================================
-// Compute Shader Bindings (Index Generation)
+// Compute Shader Bindings
 // ============================================================================
 
+// Bind Group 0: Per-chunk resources
 @group(0) @binding(0)
 var<storage, read_write> vertices: array<Vertex>;
 
 @group(0) @binding(1)
+var<uniform> chunk_uniforms: ChunkUniforms;
+
+// Bind Group 1: Global resources
+@group(1) @binding(0)
 var<storage, read_write> indices: array<u32>;
 
-@group(1) @binding(0)
-var<uniform> uniforms: TerrainUniforms;
+@group(1) @binding(1)
+var<uniform> global_uniforms: GlobalUniforms;
 
 
 // ============================================================================
@@ -374,7 +388,7 @@ fn get_terrain_height(world_x: f32, world_z: f32, seed: f32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_generate_indices(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let grid_size = uniforms.grid_size;
+    let grid_size = chunk_uniforms.grid_size;
     let x = gid.x;
     let z = gid.y;
     
@@ -408,7 +422,7 @@ fn cs_generate_indices(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let grid_size = uniforms.grid_size;
+    let grid_size = chunk_uniforms.grid_size;
     let x = gid.x;
     let z = gid.y;
     
@@ -417,17 +431,18 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     
     let index = z * grid_size + x;
-    let seed = uniforms.seed;
+    let seed = global_uniforms.seed;
     
     // Calculate world position
     let half_size = f32(grid_size) * 0.5;
-    let spacing = 1.0;  // World units between vertices (increased for larger terrain)
+    let spacing = 1.0;
     
     let local_x = (f32(x) - half_size) * spacing;
     let local_z = (f32(z) - half_size) * spacing;
     
-    let world_x = local_x + uniforms.chunk_offset_x;
-    let world_z = local_z + uniforms.chunk_offset_z;
+    // Add chunk offset for world position
+    let world_x = local_x + chunk_uniforms.offset_x;
+    let world_z = local_z + chunk_uniforms.offset_z;
     
     // Sample terrain height using climate model
     let world_y = get_terrain_height(world_x, world_z, seed);
@@ -441,6 +456,7 @@ fn cs_update_terrain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tangent_z = vec3<f32>(0.0, height_pz - world_y, delta);
     let normal = normalize(cross(tangent_z, tangent_x));
     
+    // Store local position (chunk offset applied in shader)
     vertices[index].position = vec4<f32>(local_x, world_y, local_z, 1.0);
     vertices[index].normal = vec4<f32>(normal, 0.0);
 }
@@ -463,9 +479,9 @@ var terrain_textures: texture_2d_array<f32>;
 @group(2) @binding(1)
 var terrain_sampler: sampler;
 
-// Render uniforms (for debug mode)
+// Render uniforms (for debug mode and fog)
 @group(3) @binding(0)
-var<uniform> render_uniforms: TerrainUniforms;
+var<uniform> render_uniforms: GlobalUniforms;
 
 
 // ============================================================================
@@ -603,97 +619,103 @@ fn get_debug_color(climate: ClimateChannels, debug_mode: u32) -> vec4<f32> {
 // Fragment Shader
 // ============================================================================
 
+// Fog constants
+const FOG_COLOR: vec3<f32> = vec3(0.7, 0.8, 0.9);  // Light blue-grey (matches sky)
+const FOG_START: f32 = 150.0;   // Start fading at this distance
+const FOG_END: f32 = 350.0;     // Fully fogged at this distance
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(in.world_normal);
     let debug_mode = render_uniforms.debug_mode;
     let seed = render_uniforms.seed;
     
-    // Check if we're in debug mode
+    // Get camera position for fog
+    let camera_pos = vec3(render_uniforms.camera_x, render_uniforms.camera_y, render_uniforms.camera_z);
+    
+    // Calculate distance from camera for fog
+    let frag_pos = in.world_position;
+    let distance = length(frag_pos - camera_pos);
+    
+    // Debug mode visualization
     if (debug_mode != DEBUG_MODE_NORMAL) {
-        // Recalculate climate for debug visualization
-        let world_pos = vec3(
-            in.world_position.x + render_uniforms.chunk_offset_x,
-            0.0,
-            in.world_position.z + render_uniforms.chunk_offset_z
-        );
+        // Use stored position (already in world space with chunk offset)
+        let world_pos = vec3(frag_pos.x, 0.0, frag_pos.z);
         let climate = get_climate_channels(world_pos, seed);
         
-        // Get debug visualization color
         var debug_color = get_debug_color(climate, debug_mode);
         
-        // Apply simple lighting even in debug mode for depth perception
+        // Apply lighting
         let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
         let ambient = 0.4;
         let diffuse = max(dot(normal, light_dir), 0.0) * 0.6;
         debug_color = vec4(debug_color.rgb * (ambient + diffuse), 1.0);
         
-        return debug_color;
+        // Apply fog
+        let fog_factor = smoothstep(FOG_START, FOG_END, distance);
+        let fogged_color = mix(debug_color.rgb, FOG_COLOR, fog_factor);
+        
+        return vec4(fogged_color, 1.0);
     }
     
-    // === Normal Rendering with Water and Terrain ===
+    // === Normal Rendering with Water, Terrain, and Fog ===
     let height = in.world_position.y;
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
     
+    var terrain_color: vec3<f32>;
+    
     // Check if below sea level (water visualization)
     if (height < 0.0) {
-        // Water/Ocean coloring based on depth
         let depth = abs(height);
-        let deep_water = vec3(0.02, 0.08, 0.25);   // Deep ocean (dark blue)
-        let shallow_water = vec3(0.1, 0.35, 0.6);  // Shallow water (lighter blue)
+        let deep_water = vec3(0.02, 0.08, 0.25);
+        let shallow_water = vec3(0.1, 0.35, 0.6);
         
-        // Blend based on depth: shallow (0) to deep (-80)
         let depth_factor = smoothstep(0.0, 60.0, depth);
-        var water_color = mix(shallow_water, deep_water, depth_factor);
+        terrain_color = mix(shallow_water, deep_water, depth_factor);
         
         // Apply lighting
         let ambient = 0.5;
         let diffuse = max(dot(normal, light_dir), 0.0) * 0.4;
-        water_color = water_color * (ambient + diffuse);
+        terrain_color = terrain_color * (ambient + diffuse);
         
-        // Add subtle wave highlights
+        // Wave highlights
         let wave_highlight = pow(max(dot(normal, light_dir), 0.0), 8.0) * 0.15;
-        water_color += vec3(wave_highlight);
+        terrain_color += vec3(wave_highlight);
+    } else {
+        // === Land Rendering ===
+        let slope = normal.y;
         
-        return vec4(water_color, 1.0);
+        // Base colors
+        let grass_color = vec3(0.25, 0.55, 0.2);
+        let rock_color = vec3(0.45, 0.4, 0.35);
+        let sand_color = vec3(0.76, 0.7, 0.5);
+        let snow_color = vec3(0.95, 0.97, 1.0);
+        
+        // Height-based coloring
+        if (height < 10.0) {
+            let beach_factor = smoothstep(0.0, 10.0, height);
+            terrain_color = mix(sand_color, grass_color, beach_factor);
+        } else if (height < 100.0) {
+            terrain_color = grass_color;
+        } else {
+            let snow_factor = smoothstep(100.0, 180.0, height);
+            terrain_color = mix(grass_color, snow_color, snow_factor);
+        }
+        
+        // Slope-based rock blending
+        let rock_factor = 1.0 - smoothstep(0.5, 0.85, slope);
+        terrain_color = mix(terrain_color, rock_color, rock_factor);
+        
+        // Apply lighting
+        let ambient = 0.35;
+        let diffuse = max(dot(normal, light_dir), 0.0) * 0.65;
+        terrain_color = terrain_color * (ambient + diffuse);
     }
     
-    // === Land Rendering ===
-    // Slope-based material blending
-    let slope = normal.y;  // 1.0 = flat, 0.0 = vertical cliff
+    // Apply distance fog
+    let fog_factor = smoothstep(FOG_START, FOG_END, distance);
+    let final_color = mix(terrain_color, FOG_COLOR, fog_factor);
     
-    // Base colors
-    let grass_color = vec3(0.25, 0.55, 0.2);   // Green grass
-    let rock_color = vec3(0.45, 0.4, 0.35);    // Gray-brown rock
-    let sand_color = vec3(0.76, 0.7, 0.5);     // Beach sand
-    let snow_color = vec3(0.95, 0.97, 1.0);    // White snow
-    
-    // Determine base terrain color by height and slope
-    var terrain_color: vec3<f32>;
-    
-    // Beach zone (just above water)
-    if (height < 10.0) {
-        let beach_factor = smoothstep(0.0, 10.0, height);
-        terrain_color = mix(sand_color, grass_color, beach_factor);
-    }
-    // Normal land
-    else if (height < 100.0) {
-        terrain_color = grass_color;
-    }
-    // High altitude (snow)
-    else {
-        let snow_factor = smoothstep(100.0, 180.0, height);
-        terrain_color = mix(grass_color, snow_color, snow_factor);
-    }
-    
-    // Slope-based rock blending (steep = rock)
-    let rock_factor = 1.0 - smoothstep(0.5, 0.85, slope);
-    terrain_color = mix(terrain_color, rock_color, rock_factor);
-    
-    // Apply lighting
-    let ambient = 0.35;
-    let diffuse = max(dot(normal, light_dir), 0.0) * 0.65;
-    terrain_color = terrain_color * (ambient + diffuse);
-    
-    return vec4(terrain_color, 1.0);
+    return vec4(final_color, 1.0);
 }
+
