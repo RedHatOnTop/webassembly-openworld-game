@@ -212,9 +212,30 @@ impl Renderer {
             }],
         });
 
+        // Group 4: Per-chunk render uniform (offset)
+        let render_chunk_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Render Chunk Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Debug Pipeline Layout"),
-            bind_group_layouts: &[&render_storage_layout, camera_bind_group_layout, &render_texture_layout, &render_uniform_layout],
+            bind_group_layouts: &[
+                &render_storage_layout,      // Group 0
+                camera_bind_group_layout,    // Group 1
+                &render_texture_layout,      // Group 2
+                &render_uniform_layout,      // Group 3
+                &render_chunk_layout,        // Group 4 - FIX
+            ],
             push_constant_ranges: &[],
         });
 
@@ -398,11 +419,13 @@ impl Renderer {
             );
 
             // Draw each active chunk
-            let mut chunks_drawn = 0;
+            let mut _chunks_drawn = 0;
             for chunk in self.terrain_system.get_active_chunks() {
-                render_pass.set_bind_group(0, &chunk.render_bind_group, &[]);
+                // Bind per-chunk resources
+                render_pass.set_bind_group(0, &chunk.render_bind_group, &[]);  // Vertex storage
+                render_pass.set_bind_group(4, &chunk.render_uniform_bind_group, &[]);  // FIX: Per-chunk offset
                 render_pass.draw_indexed(0..terrain::INDEX_COUNT, 0, 0..1);
-                chunks_drawn += 1;
+                _chunks_drawn += 1;
             }
         }
 

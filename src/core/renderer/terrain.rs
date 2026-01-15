@@ -261,12 +261,28 @@ impl TerrainSystem {
             }],
         });
 
-        // Render uniform layout (for fragment shader)
+        // Render uniform layout (for fragment shader - global uniforms) - Group 3
         let render_uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain Render Uniform Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        // Per-chunk render uniform layout (for vertex shader offset) - Group 4
+        // FIX: This allows each chunk to have its own offset during rendering
+        let render_chunk_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Render Chunk Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -391,14 +407,15 @@ impl TerrainSystem {
             cache: None,
         });
 
-        // Render pipeline layout
+        // Render pipeline layout - now with 5 bind groups including per-chunk offset
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Render Pipeline Layout"),
             bind_group_layouts: &[
                 &render_storage_layout,      // Group 0: Per-chunk vertex storage
                 camera_bind_group_layout,    // Group 1: Camera
                 &render_texture_layout,      // Group 2: Textures
-                &render_uniform_layout,      // Group 3: Global uniforms
+                &render_uniform_layout,      // Group 3: Global uniforms (fog, debug)
+                &render_chunk_layout,        // Group 4: Per-chunk uniforms (offset) - FIX
             ],
             push_constant_ranges: &[],
         });
@@ -454,12 +471,13 @@ impl TerrainSystem {
         let mut chunks = Vec::with_capacity(CHUNK_POOL_SIZE);
         let initial_coords = get_required_chunks((0, 0));
         
-        for (i, coord) in initial_coords.iter().enumerate() {
+        for (_i, coord) in initial_coords.iter().enumerate() {
             chunks.push(Chunk::new(
                 device,
                 *coord,
                 &compute_chunk_layout,
                 &render_storage_layout,
+                &render_chunk_layout,  // FIX: Pass render chunk layout for group 4
             ));
         }
 

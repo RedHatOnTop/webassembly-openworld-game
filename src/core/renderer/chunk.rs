@@ -97,8 +97,12 @@ pub struct Chunk {
     /// Bind group for compute shader (vertex buffer + uniforms).
     pub compute_bind_group: wgpu::BindGroup,
 
-    /// Bind group for render shader (vertex buffer as storage).
+    /// Bind group for render shader (vertex buffer as storage) - Group 0.
     pub render_bind_group: wgpu::BindGroup,
+
+    /// Bind group for render shader per-chunk uniform (offset) - Group 4.
+    /// FIX: Each chunk needs its own bind group to avoid stacking bug.
+    pub render_uniform_bind_group: wgpu::BindGroup,
 
     /// Whether this chunk should be rendered.
     pub active: bool,
@@ -114,12 +118,14 @@ impl Chunk {
     /// * `device` - WebGPU device for buffer creation.
     /// * `coord` - Initial logical chunk coordinate.
     /// * `compute_storage_layout` - Bind group layout for compute shader.
-    /// * `render_storage_layout` - Bind group layout for render shader.
+    /// * `render_storage_layout` - Bind group layout for render shader (group 0).
+    /// * `render_uniform_layout` - Bind group layout for per-chunk render uniforms (group 4).
     pub fn new(
         device: &wgpu::Device,
         coord: (i32, i32),
         compute_storage_layout: &wgpu::BindGroupLayout,
         render_storage_layout: &wgpu::BindGroupLayout,
+        render_uniform_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // Pre-allocate vertex buffer
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -153,7 +159,7 @@ impl Chunk {
             ],
         });
 
-        // Create render bind group (vertex buffer read-only)
+        // Create render bind group (vertex buffer read-only) - Group 0
         let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(&format!("Chunk Render Bind Group ({}, {})", coord.0, coord.1)),
             layout: render_storage_layout,
@@ -165,6 +171,19 @@ impl Chunk {
             ],
         });
 
+        // Create render uniform bind group (offset) - Group 4
+        // FIX: Each chunk has its own bind group so they don't overwrite each other
+        let render_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("Chunk Render Uniform Bind Group ({}, {})", coord.0, coord.1)),
+            layout: render_uniform_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         Self {
             coord,
             vertex_buffer,
@@ -172,6 +191,7 @@ impl Chunk {
             uniforms,
             compute_bind_group,
             render_bind_group,
+            render_uniform_bind_group,
             active: true,
             dirty: true, // New chunks need initial generation
         }

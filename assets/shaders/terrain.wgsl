@@ -479,9 +479,13 @@ var terrain_textures: texture_2d_array<f32>;
 @group(2) @binding(1)
 var terrain_sampler: sampler;
 
-// Render uniforms (for debug mode and fog)
+// Global uniforms (for debug mode and fog)
 @group(3) @binding(0)
 var<uniform> render_uniforms: GlobalUniforms;
+
+// Per-chunk uniforms (for offset) - FIX: each chunk needs its own offset
+@group(4) @binding(0)
+var<uniform> render_chunk: ChunkUniforms;
 
 
 // ============================================================================
@@ -518,10 +522,15 @@ struct VertexOutput {
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let vertex = vertices_read[vertex_index];
     
+    // Apply chunk offset to get world position (FIX for stacking bug)
+    let world_x = vertex.position.x + render_chunk.offset_x;
+    let world_z = vertex.position.z + render_chunk.offset_z;
+    let world_pos = vec4<f32>(world_x, vertex.position.y, world_z, 1.0);
+    
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vertex.position;
+    out.clip_position = camera.view_proj * world_pos;
     out.world_normal = vertex.normal.xyz;
-    out.world_position = vertex.position.xyz;
+    out.world_position = world_pos.xyz;
     return out;
 }
 
