@@ -363,13 +363,13 @@ fn get_biome_type(world_x: f32, world_z: f32, seed: f32) -> BiomeType {
     let climate = get_climate_channels(world_x, world_z, seed);
     let weirdness = hash2d(world_x * 0.01, world_z * 0.01, seed + 100.0);
     
-    // Ocean/underwater
-    if height < 1.0 || climate.continentalness < -0.1 {
+    // Ocean/underwater - be more conservative
+    if height < 3.0 || climate.continentalness < 0.0 {
         return BiomeType::Ocean;
     }
     
     // Beach (low coastal areas)
-    if height < 5.0 && climate.continentalness < 0.1 {
+    if height < 10.0 && climate.continentalness < 0.15 {
         return BiomeType::Beach;
     }
     
@@ -441,8 +441,8 @@ pub fn generate_structures(
             // Get height at JITTERED position
             let height = get_terrain_height(world_x, world_z, seed);
             
-            // Extra safety: skip if underwater
-            if height < 3.0 {
+            // Extra safety: skip if near water or low
+            if height < 8.0 {
                 continue;
             }
             
@@ -489,8 +489,16 @@ pub fn generate_structures(
             };
             let scale = base_scale * (0.8 + hash2d(world_x * 3.0, world_z * 3.0, seed) * 0.4);
             
+            // Y offset based on model type (pivot correction)
+            let y_offset = match structure_type {
+                StructureType::TreePine | StructureType::TreeOak => 0.0,  // Trees have bottom pivot
+                StructureType::RockSmall => -0.3 * scale,  // Sink rocks slightly
+                StructureType::RockLarge => -0.5 * scale,
+                StructureType::RuinPillar | StructureType::RuinWall => -0.2 * scale,
+            };
+            
             let rotation = hash2d(world_x * 2.0, world_z * 2.0, seed) * std::f32::consts::TAU;
-            let position = Vec3::new(world_x, height, world_z);
+            let position = Vec3::new(world_x, height + y_offset, world_z);
             
             structures.push((structure_type, StructureInstance::new(position, rotation, scale)));
         }
