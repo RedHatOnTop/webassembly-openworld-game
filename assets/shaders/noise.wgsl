@@ -59,12 +59,12 @@ fn hash_int(x: i32) -> u32 {
 
 /// 3D hash for simplex noise.
 fn hash_3d(x: i32, y: i32, z: i32) -> u32 {
-    return hash_int(x + hash_int(y + hash_int(z) as i32) as i32);
+    return hash_int(x + i32(hash_int(y + i32(hash_int(z)))));
 }
 
 /// 4D hash for simplex noise.
 fn hash_4d(x: i32, y: i32, z: i32, w: i32) -> u32 {
-    return hash_int(x + hash_int(y + hash_int(z + hash_int(w) as i32) as i32) as i32);
+    return hash_int(x + i32(hash_int(y + i32(hash_int(z + i32(hash_int(w)))))));
 }
 
 // ============================================================================

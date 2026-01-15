@@ -46,7 +46,7 @@ fn hash_int(x: i32) -> u32 {
 
 /// 3D hash for simplex noise.
 fn hash_3d(x: i32, y: i32, z: i32) -> u32 {
-    return hash_int(x + hash_int(y + hash_int(z) as i32) as i32);
+    return hash_int(x + i32(hash_int(y + i32(hash_int(z)))));
 }
 
 /// 3D Simplex Noise. Returns value in range [-1.0, 1.0].
@@ -204,46 +204,36 @@ const CONTINENTALNESS_SPLINE: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2( 1.0,  1.0)    // Peak preservation
 );
 
-/// Cubic Hermite spline interpolation for continentalness remapping.
+/// Linear spline interpolation for continentalness remapping.
+/// Uses simple linear interpolation between control points.
 fn cubic_spline(t: f32, points: array<vec2<f32>, 6>) -> f32 {
-    let clamped_t = clamp(t, points[0].x, points[5].x);
+    let clamped_t = clamp(t, -1.0, 1.0);
     
-    // Find segment
-    var segment: i32 = 0;
-    for (var i = 0; i < 5; i++) {
-        if (clamped_t >= points[i].x && clamped_t < points[i + 1].x) {
-            segment = i;
-            break;
-        }
+    // Early exit for boundaries
+    if (clamped_t <= points[0].x) { return points[0].y; }
+    if (clamped_t >= points[5].x) { return points[5].y; }
+    
+    // Find segment and interpolate - unrolled loop to avoid issues
+    if (clamped_t < points[1].x) {
+        let seg_t = (clamped_t - points[0].x) / (points[1].x - points[0].x);
+        return mix(points[0].y, points[1].y, seg_t);
     }
-    if (clamped_t >= points[5].x) {
-        return points[5].y;
+    if (clamped_t < points[2].x) {
+        let seg_t = (clamped_t - points[1].x) / (points[2].x - points[1].x);
+        return mix(points[1].y, points[2].y, seg_t);
+    }
+    if (clamped_t < points[3].x) {
+        let seg_t = (clamped_t - points[2].x) / (points[3].x - points[2].x);
+        return mix(points[2].y, points[3].y, seg_t);
+    }
+    if (clamped_t < points[4].x) {
+        let seg_t = (clamped_t - points[3].x) / (points[4].x - points[3].x);
+        return mix(points[3].y, points[4].y, seg_t);
     }
     
-    let p0 = points[segment];
-    let p1 = points[segment + 1];
-    
-    // Get adjacent points for tangent calculation
-    let pm1 = select(points[segment], points[segment - 1], segment > 0);
-    let p2 = select(points[segment + 1], points[segment + 2], segment < 4);
-    
-    // Calculate Catmull-Rom tangents
-    let m0 = (p1.y - pm1.y) / (p1.x - pm1.x + 0.0001);
-    let m1 = (p2.y - p0.y) / (p2.x - p0.x + 0.0001);
-    
-    // Normalize t to [0, 1] within segment
-    let segment_t = (clamped_t - p0.x) / (p1.x - p0.x);
-    let t2 = segment_t * segment_t;
-    let t3 = t2 * segment_t;
-    
-    // Hermite basis functions
-    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-    let h10 = t3 - 2.0 * t2 + segment_t;
-    let h01 = -2.0 * t3 + 3.0 * t2;
-    let h11 = t3 - t2;
-    
-    let segment_width = p1.x - p0.x;
-    return h00 * p0.y + h10 * segment_width * m0 + h01 * p1.y + h11 * segment_width * m1;
+    // Last segment
+    let seg_t = (clamped_t - points[4].x) / (points[5].x - points[4].x);
+    return mix(points[4].y, points[5].y, seg_t);
 }
 
 
