@@ -17,12 +17,12 @@ use std::path::Path;
 /// Logical structure types mapped to asset filenames.
 /// Change these string literals to match your asset filenames.
 pub mod manifest {
-    pub const TREE_PINE: &str = "external/kenney_nature-kit/Models/GLB format/tree_cone.glb";
-    pub const TREE_OAK: &str = "external/kenney_nature-kit/Models/GLB format/tree_oak.glb";
-    pub const ROCK_SMALL: &str = "external/kenney_nature-kit/Models/GLB format/rock_smallA.glb";
-    pub const ROCK_LARGE: &str = "external/kenney_nature-kit/Models/GLB format/rock_largeA.glb";
-    pub const RUIN_PILLAR: &str = "external/kenney_platformer-kit/Models/GLB format/block_pillar.glb";
-    pub const RUIN_WALL: &str = "external/kenney_platformer-kit/Models/GLB format/block_wall.glb";
+    pub const TREE_PINE: &str = "assets/models/tree_pine.glb";
+    pub const TREE_OAK: &str = "assets/models/tree_oak.glb";
+    pub const ROCK_SMALL: &str = "assets/models/rock_small.glb";
+    pub const ROCK_LARGE: &str = "assets/models/rock_large.glb";
+    pub const RUIN_PILLAR: &str = "assets/models/ruin_pillar.glb";
+    pub const RUIN_WALL: &str = "assets/models/ruin_wall.glb";
 }
 
 // ============================================================================
