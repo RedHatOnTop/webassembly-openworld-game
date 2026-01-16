@@ -513,9 +513,9 @@ pub fn generate_structures(
 
 pub struct StructureSystem {
     model_manager: ModelManager,
-    instance_buffer: wgpu::Buffer,
+    pub instance_buffer: wgpu::Buffer,
     instance_data: Vec<(StructureType, StructureInstance)>,
-    render_pipeline: wgpu::RenderPipeline,
+    pub render_pipeline: wgpu::RenderPipeline,
     pub enabled: bool,
 }
 
@@ -641,5 +641,15 @@ impl StructureSystem {
             render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..mesh.index_count, 0, 0..instances.len() as u32);
         }
+    }
+    
+    /// Returns a reference to the render pipeline for debug model rendering.
+    pub fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.render_pipeline
+    }
+    
+    /// Returns a reference to the instance buffer for debug model rendering.
+    pub fn instance_buffer(&self) -> &wgpu::Buffer {
+        &self.instance_buffer
     }
 }

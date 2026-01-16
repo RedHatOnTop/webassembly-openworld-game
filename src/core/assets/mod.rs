@@ -194,6 +194,23 @@ pub fn load_gltf_safe(
     }
 }
 
+/// Loads a GLTF/GLB file for drag-drop debug testing.
+/// Returns a magenta fallback cube if loading fails (easy to spot errors).
+/// Used by the Debug GUI system for runtime asset testing.
+pub fn load_gltf_debug(device: &wgpu::Device, path: &str) -> LoadedMesh {
+    match load_gltf_internal(device, path) {
+        Ok(mesh) => {
+            log::info!("Debug: Loaded asset: {}", path);
+            mesh
+        }
+        Err(e) => {
+            log::warn!("Debug: Asset '{}' failed to load: {}", path, e);
+            // Magenta fallback - highly visible to indicate error
+            create_fallback_cube(device, [1.0, 0.0, 1.0, 1.0], 1.0)
+        }
+    }
+}
+
 /// Internal GLTF loading implementation.
 fn load_gltf_internal(device: &wgpu::Device, path: &str) -> Result<LoadedMesh, String> {
     // Check if file exists

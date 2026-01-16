@@ -4,18 +4,20 @@
 //! - Fixed timestep for deterministic game logic (60 Hz)
 //! - Variable timestep for smooth rendering
 //! - Free camera (WASD + mouse look)
+//! - Debug GUI overlay (egui)
 
 mod core;
 mod game;
 
-use core::{Renderer, Time};
+use core::{Renderer, Time, GuiSystem};
 use game::GameState;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, WindowEvent, MouseButton, ElementState},
+    event::{DeviceEvent, WindowEvent, ElementState},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowId},
+    window::{Window, WindowId, CursorGrabMode},
+    keyboard::{KeyCode, PhysicalKey},
 };
 
 /// Fixed timestep for game logic updates (60 Hz).
@@ -30,12 +32,46 @@ struct App {
     window: Option<Arc<Window>>,
     /// WebGPU renderer.
     renderer: Option<Renderer>,
+    /// GUI system (egui).
+    gui_system: Option<GuiSystem>,
     /// Game simulation state.
     game_state: GameState,
     /// Time manager.
     time: Time,
     /// Accumulator for fixed timestep logic.
     accumulator: f32,
+    /// FPS tracking.
+    fps_counter: FpsCounter,
+}
+
+/// Simple FPS counter.
+struct FpsCounter {
+    frame_count: u32,
+    elapsed: f32,
+    current_fps: f32,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self {
+            frame_count: 0,
+            elapsed: 0.0,
+            current_fps: 0.0,
+        }
+    }
+    
+    fn update(&mut self, delta: f32) -> f32 {
+        self.frame_count += 1;
+        self.elapsed += delta;
+        
+        if self.elapsed >= 1.0 {
+            self.current_fps = self.frame_count as f32 / self.elapsed;
+            self.frame_count = 0;
+            self.elapsed = 0.0;
+        }
+        
+        self.current_fps
+    }
 }
 
 impl App {
@@ -43,9 +79,27 @@ impl App {
         Self {
             window: None,
             renderer: None,
+            gui_system: None,
             game_state: GameState::new(),
             time: Time::new(),
             accumulator: 0.0,
+            fps_counter: FpsCounter::new(),
+        }
+    }
+    
+    /// Sets cursor grab mode based on editor mode.
+    fn update_cursor_mode(&self) {
+        if let (Some(window), Some(gui)) = (&self.window, &self.gui_system) {
+            if gui.editor_mode {
+                // Editor mode: free cursor
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                window.set_cursor_visible(true);
+            } else {
+                // Game mode: locked cursor
+                let _ = window.set_cursor_grab(CursorGrabMode::Confined)
+                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
+                window.set_cursor_visible(false);
+            }
         }
     }
 }
@@ -68,9 +122,18 @@ impl ApplicationHandler for App {
 
             let renderer = pollster::block_on(Renderer::new(Arc::clone(&window)));
             log::info!("Renderer initialized successfully");
+            
+            // Initialize GUI system
+            let gui_system = GuiSystem::new(
+                renderer.device(),
+                renderer.surface_format(),
+                &window,
+            );
+            log::info!("GUI system initialized");
 
             self.window = Some(window);
             self.renderer = Some(renderer);
+            self.gui_system = Some(gui_system);
 
             self.time = Time::new();
             log::info!(
@@ -78,11 +141,19 @@ impl ApplicationHandler for App {
                 FIXED_TIMESTEP,
                 (1.0 / FIXED_TIMESTEP) as u32
             );
-            log::info!("Controls: WASD=Move, Space/Shift=Up/Down, Right-Click+Drag=Look, F1-F4=Debug Viz");
+            log::info!("Controls: WASD=Move, Space/Shift=Up/Down, Right-Click+Drag=Look, F1=Editor Mode");
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Forward event to GUI first
+        if let (Some(window), Some(gui)) = (&self.window, &mut self.gui_system) {
+            if gui.on_window_event(window, &event) && gui.editor_mode {
+                // GUI consumed the event in editor mode
+                return;
+            }
+        }
+        
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Close requested, shutting down...");
@@ -104,13 +175,30 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.handle_key(event.physical_key, event.state.is_pressed());
+                // Handle F1 for editor mode toggle
+                if event.state == ElementState::Pressed {
+                    if let PhysicalKey::Code(KeyCode::F1) = event.physical_key {
+                        if let Some(gui) = &mut self.gui_system {
+                            gui.toggle_editor_mode();
+                            self.update_cursor_mode();
+                            return;
+                        }
+                    }
+                }
+                
+                // Forward to renderer if not in editor mode
+                if let (Some(renderer), Some(gui)) = (&mut self.renderer, &self.gui_system) {
+                    if !gui.editor_mode {
+                        renderer.handle_key(event.physical_key, event.state.is_pressed());
+                    }
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.handle_mouse_button(button, state == ElementState::Pressed);
+                // Only forward to renderer if not in editor mode
+                if let (Some(renderer), Some(gui)) = (&mut self.renderer, &self.gui_system) {
+                    if !gui.editor_mode {
+                        renderer.handle_mouse_button(button, state == ElementState::Pressed);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -119,10 +207,30 @@ impl ApplicationHandler for App {
 
                 // Get delta time with spiral-of-death protection
                 let delta_time = self.time.delta_time().min(MAX_FRAME_TIME);
+                
+                // Update FPS counter
+                let fps = self.fps_counter.update(delta_time);
 
-                // Update camera movement
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.update_movement(delta_time);
+                // Update camera movement (only if not in editor mode)
+                if let (Some(renderer), Some(gui)) = (&mut self.renderer, &self.gui_system) {
+                    if !gui.editor_mode {
+                        renderer.update_movement(delta_time);
+                    }
+                    
+                    // Update GUI state
+                    if let Some(gui) = &mut self.gui_system {
+                        gui.fps = fps;
+                        gui.frame_time_ms = delta_time * 1000.0;
+                        gui.camera_pos = renderer.camera.position;
+                        gui.biome_name = "Forest".to_string(); // TODO: Calculate from noise
+                        
+                        // Process any pending file drops
+                        gui.process_pending_files(
+                            renderer.device(),
+                            renderer.camera.position,
+                            renderer.camera.forward(),
+                        );
+                    }
                 }
 
                 // Accumulate time for fixed updates
@@ -138,8 +246,10 @@ impl ApplicationHandler for App {
                 let alpha = self.accumulator / FIXED_TIMESTEP;
 
                 // Render
-                if let Some(renderer) = &mut self.renderer {
-                    match renderer.render(&self.game_state, alpha) {
+                if let (Some(renderer), Some(window), Some(gui)) = 
+                    (&mut self.renderer, &self.window, &mut self.gui_system) 
+                {
+                    match renderer.render_with_gui(&self.game_state, alpha, gui, window) {
                         Ok(_) => {}
                         Err(wgpu::SurfaceError::OutOfMemory) => {
                             log::error!("GPU out of memory!");
@@ -164,10 +274,12 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: DeviceEvent) {
-        // Handle raw mouse motion for camera look
+        // Handle raw mouse motion for camera look (only in game mode)
         if let DeviceEvent::MouseMotion { delta } = event {
-            if let Some(renderer) = &mut self.renderer {
-                renderer.handle_mouse_motion(delta);
+            if let (Some(renderer), Some(gui)) = (&mut self.renderer, &self.gui_system) {
+                if !gui.editor_mode {
+                    renderer.handle_mouse_motion(delta);
+                }
             }
         }
     }
